@@ -1,0 +1,195 @@
+name: kyqra-ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: '22'
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with: { node-version: '22', cache: npm }
+      - run: npm ci --ignore-scripts
+      - run: npm run lint
+
+  format-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with: { node-version: '22', cache: npm }
+      - run: npm ci --ignore-scripts
+      - run: npm run format-check
+
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with: { node-version: '22', cache: npm }
+      - run: npm ci --ignore-scripts
+      - run: npm run typecheck
+
+  unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with: { node-version: '22', cache: npm }
+      - run: npm ci --ignore-scripts
+      - run: npm run test:unit
+
+  integration-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with: { node-version: '22', cache: npm }
+      - run: npm ci --ignore-scripts
+      - run: npm run test:integration
+
+  security-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with: { node-version: '22', cache: npm }
+      - run: npm ci --ignore-scripts
+      - run: npm run test:security
+
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with: { fetch-depth: 0 }
+      - name: Gitleaks
+        run: >-
+          docker run --rm -v "$PWD:/repo" -w /repo
+          zricethezav/gitleaks:v8.28.0@sha256:cdbb7c955abce02001a9f6c9f602fb195b7fadc1e812065883f695d1eeaba854
+          git --redact --verbose
+      - name: Reject private keys and live environment files
+        run: |
+          ! git ls-files | grep -E '(^|/)(\.env|id_rsa|id_ed25519|.*\.key)$'
+
+  dependency-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with: { node-version: '22', cache: npm }
+      - run: npm ci --ignore-scripts
+      - run: npm audit --audit-level=high
+
+  docker-compose-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - run: ./scripts/validate-compose.sh
+
+  public-route-policy-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with: { node-version: '22' }
+      - run: ./scripts/validate-public-policy.sh
+
+  mtls-configuration-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - run: ./scripts/validate-mtls-config.sh
+
+  rollback-script-syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - run: bash -n scripts/rollback.sh scripts/validate-compose.sh scripts/validate-mtls-config.sh
+      - run: bash -n scripts/codestra-kyqra-remediation-admin.in
+      - run: sudo visudo -cf config/codestra-kyqra-remediation.sudoers
+
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - run: docker build --pull=false --tag kyqra-ci:${{ github.sha }} .
+      - run: docker inspect --format '{{.Id}}' kyqra-ci:${{ github.sha }} | tee image-digest.txt
+      - uses: anchore/sbom-action@f8bdd1d8ac5e901a77a92f111440fdb1b593736b
+        with:
+          image: kyqra-ci:${{ github.sha }}
+          format: spdx-json
+          output-file: sbom.spdx.json
+          upload-artifact: false
+      - name: Scan exact image
+        run: >-
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock
+          aquasec/trivy:0.72.0@sha256:cffe3f5161a47a6823fbd23d985795b3ed72a4c806da4c4df16266c02accdd6f
+          image --scanners vuln --severity HIGH,CRITICAL --exit-code 1
+          --no-progress --format json kyqra-ci:${{ github.sha }} > trivy.json
+      - run: test "$(jq '[.Results[].Vulnerabilities[]?] | length' trivy.json)" = 0
+      - name: Verify non-root image metadata
+        run: |
+          docker inspect --format '{{.Config.User}}' kyqra-ci:${{ github.sha }} | tee non-root.txt
+          test "$(cat non-root.txt)" = pwuser
+      - name: Exercise health endpoints with fixtures
+        run: |
+          docker network create kyqra-fixture
+          docker run -d --name kyqra-ci-redis --network kyqra-fixture redis:7.4-alpine@sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2
+          docker run -d --name kyqra-ci-postgres --network kyqra-fixture -e POSTGRES_PASSWORD=fixture-only -e POSTGRES_USER=crawler -e POSTGRES_DB=crawler postgres:17-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73
+          for i in $(seq 1 60); do docker exec kyqra-ci-postgres pg_isready -U crawler && break; sleep 1; done
+          docker run -d --name kyqra-ci-api --network kyqra-fixture -p 127.0.0.1:3100:3000 -e ROLE=api -e REDIS_HOST=kyqra-ci-redis -e DATABASE_URL=postgresql://crawler:fixture-only@kyqra-ci-postgres:5432/crawler -e API_KEY=fixture-only kyqra-ci:${{ github.sha }}
+          for i in $(seq 1 60); do curl -fsS http://127.0.0.1:3100/readyz && break; sleep 1; done
+          test "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:3100/healthz)" = 200
+          test "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:3100/readyz)" = 200
+          test "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:3100/api/v1/jobs)" = 401
+          printf 'HEALTHZ=200\nREADYZ=200\nUNAUTHENTICATED_JOB=401\nSCRAPER_JOBS_STARTED=0\n' > health-report.txt
+      - name: Build provenance
+        run: |
+          printf '{"_type":"https://in-toto.io/Statement/v1","subject":[{"name":"kyqra-ci","digest":{"sha256":"%s"}}],"predicateType":"https://slsa.dev/provenance/v1","predicate":{"buildDefinition":{"externalParameters":{"gitCommit":"%s"}},"runDetails":{"builder":{"id":"github-actions"}}}}\n' "$(sed 's/^sha256://' image-digest.txt)" "$GITHUB_SHA" > provenance.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: kyqra-ci-reports
+          path: |
+            image-digest.txt
+            sbom.spdx.json
+            provenance.json
+            trivy.json
+            non-root.txt
+            health-report.txt
+          retention-days: 7
+
+  container-vulnerability-scan:
+    needs: docker-build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with: { name: kyqra-ci-reports }
+      - run: test "$(jq '[.Results[].Vulnerabilities[]?] | length' trivy.json)" = 0
+
+  non-root-container-check:
+    needs: docker-build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with: { name: kyqra-ci-reports }
+      - run: test "$(cat non-root.txt)" = pwuser
+
+  health-endpoint-tests:
+    needs: docker-build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with: { name: kyqra-ci-reports }
+      - run: grep -Fxq 'HEALTHZ=200' health-report.txt
+      - run: grep -Fxq 'READYZ=200' health-report.txt
+      - run: grep -Fxq 'UNAUTHENTICATED_JOB=401' health-report.txt
+      - run: grep -Fxq 'SCRAPER_JOBS_STARTED=0' health-report.txt

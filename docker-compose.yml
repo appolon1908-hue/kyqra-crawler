@@ -1,0 +1,107 @@
+name: kyqra-crawler
+x-app: &app
+  image: '${KYQRA_IMAGE:?set an immutable image reference containing @sha256}'
+  env_file: '${KYQRA_ENV_FILE:-.env}'
+  environment:
+    REDIS_HOST: redis
+    DATABASE_URL: postgresql://crawler:${POSTGRES_PASSWORD}@postgres:5432/crawler
+  networks: [backend]
+  restart: unless-stopped
+  init: true
+services:
+  api:
+    <<: *app
+    environment:
+      REDIS_HOST: redis
+      DATABASE_URL: postgresql://crawler:${POSTGRES_PASSWORD}@postgres:5432/crawler
+      ROLE: api
+    ports: ['127.0.0.1:3100:3000']
+    networks: [backend, frontend]
+    depends_on:
+      redis: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+    mem_limit: 1g
+    cpus: 2
+    healthcheck:
+      {
+        test: ['CMD', 'curl', '-fsS', 'http://localhost:3000/health'],
+        interval: 30s,
+        timeout: 5s,
+        retries: 3,
+      }
+  http-worker:
+    <<: *app
+    networks: [backend, frontend]
+    environment:
+      {
+        REDIS_HOST: redis,
+        DATABASE_URL: 'postgresql://crawler:${POSTGRES_PASSWORD}@postgres:5432/crawler',
+        ROLE: worker,
+        HTTP_CONCURRENCY: 15,
+        BROWSER_CONCURRENCY: 3,
+        JOB_CONCURRENCY: 2,
+      }
+    depends_on: [api]
+    mem_limit: 4g
+    cpus: 6
+  browser-worker:
+    <<: *app
+    networks: [backend, frontend]
+    environment:
+      {
+        REDIS_HOST: redis,
+        DATABASE_URL: 'postgresql://crawler:${POSTGRES_PASSWORD}@postgres:5432/crawler',
+        ROLE: worker,
+        HTTP_CONCURRENCY: 10,
+        BROWSER_CONCURRENCY: 3,
+        JOB_CONCURRENCY: 1,
+      }
+    depends_on: [api]
+    shm_size: 1gb
+    mem_limit: 8g
+    cpus: 6
+  callback-worker:
+    <<: *app
+    networks: [backend, frontend]
+    environment:
+      {
+        REDIS_HOST: redis,
+        DATABASE_URL: 'postgresql://crawler:${POSTGRES_PASSWORD}@postgres:5432/crawler',
+        ROLE: callback,
+      }
+    depends_on: [api]
+    mem_limit: 512m
+    cpus: 1
+  redis:
+    image: redis:7.4-alpine@sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2
+    command:
+      [
+        'redis-server',
+        '--appendonly',
+        'yes',
+        '--maxmemory',
+        '2gb',
+        '--maxmemory-policy',
+        'noeviction',
+      ]
+    volumes: ['redis:/data']
+    networks: [backend]
+    restart: unless-stopped
+    mem_limit: 3g
+    healthcheck: { test: ['CMD', 'redis-cli', 'ping'], interval: 10s, timeout: 3s, retries: 5 }
+  postgres:
+    image: postgres:17-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73
+    environment:
+      { POSTGRES_USER: crawler, POSTGRES_PASSWORD: '${POSTGRES_PASSWORD}', POSTGRES_DB: crawler }
+    volumes: ['postgres:/var/lib/postgresql/data']
+    networks: [backend]
+    restart: unless-stopped
+    mem_limit: 2g
+    healthcheck:
+      { test: ['CMD-SHELL', 'pg_isready -U crawler'], interval: 10s, timeout: 3s, retries: 5 }
+networks:
+  backend: { internal: true }
+  frontend: {}
+volumes:
+  redis:
+  postgres:

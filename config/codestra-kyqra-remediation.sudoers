@@ -1,0 +1,9 @@
+Defaults!/usr/local/sbin/codestra-kyqra-remediation-admin env_reset
+Defaults!/usr/local/sbin/codestra-kyqra-remediation-admin secure_path=/usr/sbin:/usr/bin:/sbin:/bin
+kyqra-deploy ALL=(root) NOPASSWD: /usr/local/sbin/codestra-kyqra-remediation-admin status
+kyqra-deploy ALL=(root) NOPASSWD: /usr/local/sbin/codestra-kyqra-remediation-admin preflight
+kyqra-deploy ALL=(root) NOPASSWD: /usr/local/sbin/codestra-kyqra-remediation-admin install
+kyqra-deploy ALL=(root) NOPASSWD: /usr/local/sbin/codestra-kyqra-remediation-admin validate
+kyqra-deploy ALL=(root) NOPASSWD: /usr/local/sbin/codestra-kyqra-remediation-admin verify
+kyqra-deploy ALL=(root) NOPASSWD: /usr/local/sbin/codestra-kyqra-remediation-admin rollback
+kyqra-deploy ALL=(root) NOPASSWD: /usr/local/sbin/codestra-kyqra-remediation-admin cleanup-staging
