@@ -1,0 +1,80 @@
+name: sign-kyqra-release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+  artifact-metadata: write
+  packages: write
+
+concurrency:
+  group: kyqra-release-signing
+  cancel-in-progress: false
+
+jobs:
+  verify-and-sign:
+    name: verify-and-sign-immutable-release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          fetch-depth: 0
+
+      - name: Enforce protected release identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "appolon1908-hue/kyqra-crawler"
+          test "$GITHUB_REF" = "refs/heads/main"
+          test "$GITHUB_EVENT_NAME" = "workflow_dispatch"
+          test "$(git status --porcelain)" = ""
+          test "$(git rev-parse kyqra-mtls-staging-20260820^{commit})" = "a9d59681a7857795adc086d2464859674901e393"
+          test "$(jq -r .repository release/kyqra-mtls-staging-20260820.json)" = "$GITHUB_REPOSITORY"
+          test "$(jq -r .source_commit release/kyqra-mtls-staging-20260820.json)" = "a9d59681a7857795adc086d2464859674901e393"
+          test "$(jq -r .registry_digest release/kyqra-mtls-staging-20260820.json)" = "sha256:1d918aa99ce19a7831baafdf428f3323abf8134472c2a5f202a60a84181e15e0"
+          test "$(jq -r .linux_amd64_platform_digest release/kyqra-mtls-staging-20260820.json)" = "sha256:b5ad0fe7aed3d7de20e882d8f84295485b4d85c2ab54229895e46689fdf4484e"
+          test "$(jq -r .release_tag release/kyqra-mtls-staging-20260820.json)" = "kyqra-mtls-staging-20260820"
+          test "$(jq -r .required_workflow release/kyqra-mtls-staging-20260820.json)" = ".github/workflows/sign-kyqra-release.yml"
+          test "$(sha256sum .github/workflows/sign-kyqra-release.yml | cut -d' ' -f1)" = "$(jq -r .signing_workflow_sha256 release/kyqra-mtls-staging-20260820.json)"
+
+      - name: Verify approved evidence payloads
+        shell: bash
+        run: |
+          set -euo pipefail
+          gzip -dc release/evidence/final-image-sbom.spdx.json.gz > "$RUNNER_TEMP/final-image-sbom.spdx.json"
+          test "$(sha256sum "$RUNNER_TEMP/final-image-sbom.spdx.json" | cut -d' ' -f1)" = "$(jq -r .sbom_sha256 release/kyqra-mtls-staging-20260820.json)"
+          test "$(sha256sum release/evidence/final-image-provenance.json | cut -d' ' -f1)" = "$(jq -r .provenance_sha256 release/kyqra-mtls-staging-20260820.json)"
+          test "$(jq -r .buildDefinition.externalParameters.sourceCommit release/evidence/final-image-provenance.json)" = "a9d59681a7857795adc086d2464859674901e393"
+          test "$(jq -r .buildDefinition.externalParameters.registryDigest release/evidence/final-image-provenance.json)" = "sha256:1d918aa99ce19a7831baafdf428f3323abf8134472c2a5f202a60a84181e15e0"
+
+      - name: Attest immutable release signature
+        id: signature
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+        with:
+          subject-name: ghcr.io/appolon1908-hue/kyqra-crawler
+          subject-digest: sha256:1d918aa99ce19a7831baafdf428f3323abf8134472c2a5f202a60a84181e15e0
+          predicate-type: https://codestra.co/attestations/kyqra-release-signature/v1
+          predicate-path: release/evidence/release-signature.json
+          push-to-registry: true
+
+      - name: Attest approved SLSA provenance
+        id: provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+        with:
+          subject-name: ghcr.io/appolon1908-hue/kyqra-crawler
+          subject-digest: sha256:1d918aa99ce19a7831baafdf428f3323abf8134472c2a5f202a60a84181e15e0
+          predicate-type: https://slsa.dev/provenance/v1
+          predicate-path: release/evidence/final-image-provenance.json
+          push-to-registry: true
+
+      - name: Attest approved SBOM
+        id: sbom
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+        with:
+          subject-name: ghcr.io/appolon1908-hue/kyqra-crawler
+          subject-digest: sha256:1d918aa99ce19a7831baafdf428f3323abf8134472c2a5f202a60a84181e15e0
+          sbom-path: ${{ runner.temp }}/final-image-sbom.spdx.json
+          push-to-registry: true

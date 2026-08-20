@@ -117,6 +117,24 @@ jobs:
       - run: bash -n scripts/codestra-kyqra-remediation-admin.in
       - run: sudo visudo -cf config/codestra-kyqra-remediation.sudoers
 
+  release-manifest-validation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with: { node-version: '22', cache: npm }
+      - run: npm ci --ignore-scripts
+      - run: npm run test:release-signing
+      - run: test "$(git rev-parse kyqra-mtls-staging-20260820^{commit})" = a9d59681a7857795adc086d2464859674901e393
+
+  signing-workflow-security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - run: ./scripts/validate-release-signing-policy.sh
+      - run: bash -n scripts/validate-release-signing-policy.sh
+
   docker-build:
     runs-on: ubuntu-latest
     steps:
