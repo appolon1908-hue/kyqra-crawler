@@ -14,3 +14,5 @@ The privileged installer verifies the release manifest, fixed paths, commit,
 image digest, certificates, configuration and backups, then changes Compose,
 Nginx and UFW as one transaction. Any failed verification invokes rollback.
 Only the Kyqra API container and Nginx configuration are reloaded.
+The exact image is loaded from the signed, checksummed release bundle, so the
+Provider requires no registry credential and performs no floating-tag pull.

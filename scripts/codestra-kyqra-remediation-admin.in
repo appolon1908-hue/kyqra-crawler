@@ -103,7 +103,9 @@ preflight_runtime() {
   docker inspect kyqra-crawler-api-1 >/dev/null 2>&1 || die KYQRA_API_ABSENT
   docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' kyqra-crawler-api-1 | grep -Fxq kyqra-crawler || die KYQRA_CONTAINER_IDENTITY_INVALID
   df -Pk "$STATE" | awk 'NR==2{exit !($4>=1048576)}' || die BACKUP_SPACE_INSUFFICIENT
-  docker image inspect "$EXPECTED_IMAGE" >/dev/null 2>&1 || docker pull "$EXPECTED_IMAGE" >/dev/null
+  safe_regular "$RELEASE/kyqra-image.tar"
+  docker image inspect "$EXPECTED_IMAGE" >/dev/null 2>&1 || docker load -i "$RELEASE/kyqra-image.tar" >/dev/null
+  docker image inspect "$EXPECTED_IMAGE" >/dev/null 2>&1 || die PINNED_IMAGE_LOAD_FAILED
   [[ "$(docker image inspect -f '{{.Config.User}}' "$EXPECTED_IMAGE")" == pwuser ]] || die IMAGE_ROOT_USER_DENIED
   for c in telnexa-jasmin-1 klyrow-gateway-1 klyrow-postal-web-1; do
     docker inspect -f '{{.State.Running}}' "$c" 2>/dev/null | grep -Fxq true || die UNRELATED_SERVICE_UNHEALTHY

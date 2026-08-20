@@ -15,7 +15,8 @@ sed "s/__KYQRA_CLIENT_SERIAL__/$serial/g" config/nginx/kyqra-private-mtls.conf.t
 sed -e "s/__MERGED_COMMIT__/$commit/g" -e "s#__PINNED_IMAGE__#$image#g" -e "s/__CLIENT_SERIAL__/$serial/g" release/templates/RELEASE.env >"$output/RELEASE.env"
 sed "s#__RELEASE_DIR__#$output#g" release/templates/nginx-test.conf >"$output/nginx-test.conf"
 tar -C src -czf "$output/src.tgz" .
+docker image inspect "$image" >/dev/null
+docker save "$image" -o "$output/kyqra-image.tar"
 chmod 0600 "$output"/*
-(cd "$output" && sha256sum RELEASE.env codestra-kyqra-mtls.conf docker-compose.yml kyqra-public.conf nginx-test.conf src.tgz >SHA256SUMS)
+(cd "$output" && sha256sum RELEASE.env codestra-kyqra-mtls.conf docker-compose.yml kyqra-image.tar kyqra-public.conf nginx-test.conf src.tgz >SHA256SUMS)
 echo "RELEASE_DIRECTORY=$output"
-
