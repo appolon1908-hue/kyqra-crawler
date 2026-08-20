@@ -1,0 +1,199 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+umask 077
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+unset BASH_ENV ENV CDPATH GLOBIGNORE PYTHONPATH PERL5LIB RUBYLIB NODE_OPTIONS
+
+EXPECTED_COMMIT='__MERGED_COMMIT__'
+EXPECTED_IMAGE='__PINNED_IMAGE__'
+EXPECTED_CLIENT_SERIAL='__CLIENT_SERIAL__'
+RELEASE_ROOT='/opt/codestra/releases/kyqra'
+RELEASE="$RELEASE_ROOT/$EXPECTED_COMMIT"
+APP='/opt/kyqra-crawler'
+MTLS='/etc/codestra/mtls/kyqra'
+PUBLIC_NGINX='/etc/nginx/sites-available/kyqra-crawler.conf'
+ENABLED_NGINX='/etc/nginx/sites-enabled/kyqra-crawler.conf'
+PRIVATE_NGINX='/etc/nginx/conf.d/codestra-kyqra-mtls.conf'
+STATE='/var/lib/codestra-kyqra-remediation'
+BACKUPS="$STATE/backups"
+CURRENT_BACKUP="$STATE/current-backup"
+LOG='/var/log/codestra-kyqra-remediation.log'
+PUBKEY='/etc/codestra/kyqra-remediation-release-signing.pub'
+LOCK='/run/lock/codestra-kyqra-remediation.lock'
+
+die() { printf 'ERROR=%s\n' "$1" >&2; exit 1; }
+record() {
+  local outcome=$1
+  printf '%s action=%s release=%s outcome=%s\n' "$(date -u +%FT%TZ)" "$op" "$EXPECTED_COMMIT" "$outcome" >>"$LOG"
+}
+trap 'rc=$?; record "FAIL:$rc" || true' ERR
+
+[[ "$(id -u)" -eq 0 ]] || die ROOT_REQUIRED
+[[ $# -eq 1 ]] || die INVALID_ARGUMENT_COUNT
+op=$1
+case "$op" in status|preflight|install|validate|verify|rollback|cleanup-staging) ;; *) die INVALID_SUBCOMMAND ;; esac
+install -d -o root -g root -m 0700 "$STATE" "$BACKUPS"
+touch "$LOG"; chown root:root "$LOG"; chmod 0600 "$LOG"
+exec 9>"$LOCK"; flock -n -x 9 || die CONCURRENT_EXECUTION
+
+safe_regular() {
+  local f=$1 mode
+  [[ -f "$f" && ! -L "$f" ]] || die UNSAFE_RELEASE_FILE
+  [[ "$(stat -c '%U:%G' "$f")" == root:root ]] || die INVALID_RELEASE_OWNER
+  mode=$(stat -c '%a' "$f")
+  (( (8#$mode & 0022) == 0 )) || die WRITABLE_RELEASE_FILE
+}
+
+verify_release() {
+  [[ -d "$RELEASE" && ! -L "$RELEASE" ]] || die RELEASE_ABSENT
+  [[ "$(readlink -f "$RELEASE")" == "$RELEASE" ]] || die RELEASE_PATH_INVALID
+  [[ "$(stat -c '%U:%G' "$RELEASE")" == root:root ]] || die INVALID_RELEASE_OWNER
+  find "$RELEASE" -type l -print -quit | grep -q . && die RELEASE_SYMLINK_DENIED
+  find "$RELEASE" -xdev -type f -perm /022 -print -quit | grep -q . && die WRITABLE_RELEASE_FILE
+  safe_regular "$RELEASE/SHA256SUMS"
+  safe_regular "$RELEASE/RELEASE.bundle.json"
+  safe_regular "$RELEASE/RELEASE.env"
+  safe_regular "$PUBKEY"
+  jq -er '.messageSignature.signature' "$RELEASE/RELEASE.bundle.json" | base64 -d >"$STATE/.signature.bin"
+  openssl dgst -sha256 -verify "$PUBKEY" -signature "$STATE/.signature.bin" "$RELEASE/SHA256SUMS" >/dev/null || die RELEASE_SIGNATURE_INVALID
+  rm -f "$STATE/.signature.bin"
+  while read -r sum path; do
+    [[ "$sum" =~ ^[0-9a-f]{64}$ ]] || die MANIFEST_FORMAT_INVALID
+    [[ "$path" =~ ^[A-Za-z0-9._/-]+$ && "$path" != /* && "$path" != *..* ]] || die MANIFEST_PATH_INVALID
+    safe_regular "$RELEASE/$path"
+  done <"$RELEASE/SHA256SUMS"
+  (cd "$RELEASE" && sha256sum -c SHA256SUMS >/dev/null) || die RELEASE_CHECKSUM_INVALID
+  grep -Fxq "MERGED_COMMIT=$EXPECTED_COMMIT" "$RELEASE/RELEASE.env" || die COMMIT_MISMATCH
+  grep -Fxq "IMAGE=$EXPECTED_IMAGE" "$RELEASE/RELEASE.env" || die IMAGE_MISMATCH
+  grep -Fxq "CLIENT_SERIAL=$EXPECTED_CLIENT_SERIAL" "$RELEASE/RELEASE.env" || die CLIENT_SERIAL_MISMATCH
+  [[ "$EXPECTED_IMAGE" =~ ^ghcr\.io/appolon1908-hue/kyqra-crawler@sha256:[0-9a-f]{64}$ ]] || die FLOATING_IMAGE_DENIED
+  find "$RELEASE" -type f \( -name '.env' -o -name '*.key' -o -name 'id_rsa' -o -name 'id_ed25519' \) -print -quit | grep -q . && die SECRET_FILE_IN_RELEASE
+  grep -RIE '(BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY|AKIA[0-9A-Z]{16}|gh[opsu]_[A-Za-z0-9]{20,})' "$RELEASE" --exclude='RELEASE.bundle.json' >/dev/null && die SECRET_CONTENT_IN_RELEASE
+}
+
+verify_certificates() {
+  for f in server.crt server-fullchain.crt server.key client-ca.crt approved-client.crt; do safe_regular "$MTLS/$f"; done
+  [[ "$(stat -c '%a' "$MTLS/server.key")" == 600 ]] || die SERVER_KEY_MODE_INVALID
+  openssl verify -CAfile "$MTLS/client-ca.crt" "$MTLS/approved-client.crt" >/dev/null || die CLIENT_CHAIN_INVALID
+  openssl verify -CAfile "$MTLS/client-ca.crt" "$MTLS/server.crt" >/dev/null || die SERVER_CHAIN_INVALID
+  openssl x509 -checkend 1209600 -noout -in "$MTLS/server.crt" || die SERVER_CERT_EXPIRING
+  openssl x509 -checkend 1209600 -noout -in "$MTLS/approved-client.crt" || die CLIENT_CERT_EXPIRING
+  openssl x509 -in "$MTLS/server.crt" -noout -ext subjectAltName | grep -Fq 'DNS:kyqra.internal.codestra.agency' || die SERVER_DNS_SAN_INVALID
+  openssl x509 -in "$MTLS/server.crt" -noout -ext subjectAltName | grep -Fq 'IP Address:10.40.0.4' || die SERVER_IP_SAN_INVALID
+  [[ "$(openssl x509 -in "$MTLS/approved-client.crt" -noout -serial | cut -d= -f2)" == "$EXPECTED_CLIENT_SERIAL" ]] || die CLIENT_SERIAL_INVALID
+  [[ "$(openssl x509 -in "$MTLS/approved-client.crt" -noout -subject -nameopt RFC2253)" == 'subject=CN=middleware-kyqra-client' ]] || die CLIENT_SUBJECT_INVALID
+  cert_pub=$(openssl x509 -in "$MTLS/server.crt" -pubkey -noout | openssl pkey -pubin -outform DER | sha256sum | cut -d' ' -f1)
+  key_pub=$(openssl pkey -in "$MTLS/server.key" -pubout -outform DER | sha256sum | cut -d' ' -f1)
+  [[ "$cert_pub" == "$key_pub" ]] || die SERVER_KEY_MISMATCH
+}
+
+validate_configs() {
+  KYQRA_IMAGE="$EXPECTED_IMAGE" KYQRA_ENV_FILE="$APP/.env" POSTGRES_PASSWORD="$(sed -n 's/^POSTGRES_PASSWORD=//p' "$APP/.env")" \
+    docker compose --project-directory "$APP" -f "$RELEASE/docker-compose.yml" config --quiet || die COMPOSE_INVALID
+  /usr/sbin/nginx -t -c "$RELEASE/nginx-test.conf" -p /etc/nginx/ >/dev/null 2>&1 || die NGINX_STAGING_INVALID
+  grep -Fq '127.0.0.1:3100:3000' "$RELEASE/docker-compose.yml" || die LOOPBACK_BINDING_MISSING
+  ! grep -Eq '(0\.0\.0\.0|10\.40\.0\.4):3100:3000' "$RELEASE/docker-compose.yml" || die RAW_BACKEND_EXPOSED
+  grep -Fq 'listen 10.40.0.4:18444 ssl;' "$RELEASE/codestra-kyqra-mtls.conf" || die MTLS_LISTENER_INVALID
+}
+
+preflight_runtime() {
+  ss -ltnH | awk '{print $4}' | grep -Eq ':18444$' && die PORT_18444_IN_USE
+  ss -ltnH | awk '{print $4}' | grep -Fxq '10.40.0.4:3100' || die KYQRA_3100_NOT_OWNED
+  docker inspect kyqra-crawler-api-1 >/dev/null 2>&1 || die KYQRA_API_ABSENT
+  docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' kyqra-crawler-api-1 | grep -Fxq kyqra-crawler || die KYQRA_CONTAINER_IDENTITY_INVALID
+  df -Pk "$STATE" | awk 'NR==2{exit !($4>=1048576)}' || die BACKUP_SPACE_INSUFFICIENT
+  docker image inspect "$EXPECTED_IMAGE" >/dev/null 2>&1 || docker pull "$EXPECTED_IMAGE" >/dev/null
+  [[ "$(docker image inspect -f '{{.Config.User}}' "$EXPECTED_IMAGE")" == pwuser ]] || die IMAGE_ROOT_USER_DENIED
+  for c in telnexa-jasmin-1 klyrow-gateway-1 klyrow-postal-web-1; do
+    docker inspect -f '{{.State.Running}}' "$c" 2>/dev/null | grep -Fxq true || die UNRELATED_SERVICE_UNHEALTHY
+  done
+}
+
+create_backup() {
+  local stamp backup
+  stamp=$(date -u +%Y%m%dT%H%M%SZ); backup="$BACKUPS/$stamp"
+  install -d -o root -g root -m 0700 "$backup"
+  install -m 0600 "$APP/docker-compose.yml" "$backup/docker-compose.yml"
+  tar -C "$APP" -czf "$backup/src.tgz" src
+  install -m 0600 "$PUBLIC_NGINX" "$backup/kyqra-crawler.conf"
+  [[ -f "$PRIVATE_NGINX" ]] && install -m 0600 "$PRIVATE_NGINX" "$backup/codestra-kyqra-mtls.conf" || : >"$backup/private-nginx.absent"
+  /usr/sbin/ufw status numbered >"$backup/ufw-before.txt"
+  docker inspect kyqra-crawler-api-1 >"$backup/api-inspect.json"
+  docker exec kyqra-crawler-postgres-1 pg_dump -U crawler -d crawler -Fc >"$backup/crawler.dump"
+  printf '%s\n' "$backup" >"$CURRENT_BACKUP"
+  chmod 0600 "$CURRENT_BACKUP" "$backup"/*
+  (cd "$backup" && sha256sum * >SHA256SUMS && sha256sum -c SHA256SUMS >/dev/null)
+}
+
+runtime_verify() {
+  ss -ltnH | awk '{print $4}' | grep -Fxq '127.0.0.1:3100' || die LOOPBACK_3100_ABSENT
+  ! ss -ltnH | awk '{print $4}' | grep -Fxq '10.40.0.4:3100' || die PRIVATE_PLAINTEXT_STILL_OPEN
+  ss -ltnH | awk '{print $4}' | grep -Fxq '10.40.0.4:18444' || die MTLS_18444_ABSENT
+  curl -fsS --max-time 5 http://127.0.0.1:3100/healthz >/dev/null || die LOCAL_HEALTH_FAILED
+  curl -fsS --max-time 5 http://127.0.0.1:3100/readyz >/dev/null || die LOCAL_READY_FAILED
+  /usr/sbin/ufw status | grep -F '10.40.0.4 18444/tcp on enp5s0.4001' | grep -Fq '10.40.0.1' || die FIREWALL_ALLOWLIST_MISSING
+  ! /usr/sbin/ufw status | grep -Fq '10.40.0.4 3100/tcp' || die OLD_FIREWALL_RULE_PRESENT
+  /usr/sbin/nginx -t >/dev/null 2>&1 || die NGINX_RUNTIME_INVALID
+}
+
+do_rollback() {
+  local backup
+  [[ -f "$CURRENT_BACKUP" && ! -L "$CURRENT_BACKUP" ]] || die ROLLBACK_POINTER_ABSENT
+  backup=$(<"$CURRENT_BACKUP")
+  [[ "$backup" == "$BACKUPS"/* && -d "$backup" && ! -L "$backup" ]] || die ROLLBACK_PATH_INVALID
+  (cd "$backup" && sha256sum -c SHA256SUMS >/dev/null) || die BACKUP_CHECKSUM_INVALID
+  install -m 0644 "$backup/docker-compose.yml" "$APP/docker-compose.yml"
+  rm -rf "$APP/src.rollback-staging"; install -d -o root -g root -m 0755 "$APP/src.rollback-staging"
+  tar -C "$APP/src.rollback-staging" --strip-components=1 -xzf "$backup/src.tgz"
+  rm -rf "$APP/src"; mv "$APP/src.rollback-staging" "$APP/src"
+  install -m 0644 "$backup/kyqra-crawler.conf" "$PUBLIC_NGINX"; install -m 0644 "$backup/kyqra-crawler.conf" "$ENABLED_NGINX"
+  if [[ -f "$backup/private-nginx.absent" ]]; then rm -f "$PRIVATE_NGINX"; else install -m 0644 "$backup/codestra-kyqra-mtls.conf" "$PRIVATE_NGINX"; fi
+  /usr/sbin/nginx -t >/dev/null 2>&1; systemctl reload nginx
+  /usr/sbin/ufw --force delete allow in on enp5s0.4001 from 10.40.0.1 to 10.40.0.4 port 18444 proto tcp >/dev/null 2>&1 || true
+  /usr/sbin/ufw allow in on enp5s0.4001 from 10.40.0.1 to 10.40.0.4 port 3100 proto tcp comment 'Middleware to Kyqra private API' >/dev/null
+  (cd "$APP" && docker compose -p kyqra-crawler -f docker-compose.yml up -d --no-deps --force-recreate api >/dev/null)
+  curl -fsS --max-time 10 http://127.0.0.1:3100/health >/dev/null
+  record PASS
+  printf 'ROLLBACK=PASS\n'
+}
+
+case "$op" in
+  status)
+    printf 'EXPECTED_COMMIT=%s\nEXPECTED_IMAGE=%s\n' "$EXPECTED_COMMIT" "$EXPECTED_IMAGE"
+    ss -ltnH | awk '$4 ~ /:(3100|18444)$/{print "LISTENER=" $4}'
+    record PASS
+    ;;
+  validate)
+    verify_release; verify_certificates; validate_configs; record PASS; printf 'VALIDATE=PASS\n'
+    ;;
+  preflight)
+    verify_release; verify_certificates; validate_configs; preflight_runtime; record PASS; printf 'PREFLIGHT=PASS\n'
+    ;;
+  install)
+    verify_release; verify_certificates; validate_configs; preflight_runtime; create_backup
+    trap 'rc=$?; trap - ERR; op=automatic-rollback; do_rollback || true; exit $rc' ERR
+    install -m 0644 "$RELEASE/docker-compose.yml" "$APP/docker-compose.yml"
+    rm -rf "$APP/src.install-staging"; install -d -o root -g root -m 0755 "$APP/src.install-staging"
+    tar -C "$APP/src.install-staging" -xzf "$RELEASE/src.tgz"
+    rm -rf "$APP/src"; mv "$APP/src.install-staging" "$APP/src"
+    install -m 0644 "$RELEASE/kyqra-public.conf" "$PUBLIC_NGINX"
+    install -m 0644 "$RELEASE/kyqra-public.conf" "$ENABLED_NGINX"
+    install -m 0644 "$RELEASE/codestra-kyqra-mtls.conf" "$PRIVATE_NGINX"
+    /usr/sbin/nginx -t >/dev/null 2>&1
+    /usr/sbin/ufw allow in on enp5s0.4001 from 10.40.0.1 to 10.40.0.4 port 18444 proto tcp comment 'Middleware to Kyqra mTLS API' >/dev/null
+    (cd "$APP" && KYQRA_IMAGE="$EXPECTED_IMAGE" docker compose -p kyqra-crawler -f docker-compose.yml up -d --no-deps --force-recreate api >/dev/null)
+    systemctl reload nginx
+    for _ in $(seq 1 30); do curl -fsS --max-time 3 http://127.0.0.1:3100/readyz >/dev/null 2>&1 && break; sleep 1; done
+    /usr/sbin/ufw --force delete allow in on enp5s0.4001 from 10.40.0.1 to 10.40.0.4 port 3100 proto tcp >/dev/null
+    runtime_verify
+    trap - ERR; record PASS; printf 'INSTALL=PASS\n'
+    ;;
+  verify)
+    verify_release; verify_certificates; runtime_verify; record PASS; printf 'VERIFY=PASS\n'
+    ;;
+  rollback) do_rollback ;;
+  cleanup-staging)
+    rm -f "$STATE/.signature.bin"; record PASS; printf 'CLEANUP_STAGING=PASS\n'
+    ;;
+esac
