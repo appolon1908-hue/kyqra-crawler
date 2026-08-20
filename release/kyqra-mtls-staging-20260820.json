@@ -10,7 +10,7 @@
   "sbom_gzip_sha256": "d28597dc121c125d3553c660c37b0b33ee0b3062cc53158e708be98818b4220c",
   "provenance_sha256": "4654da3fb9b72f76c865113d4dab1a6b57e377793b2cd8c81041e50bba69a040",
   "required_workflow": ".github/workflows/sign-kyqra-release.yml",
-  "signing_workflow_sha256": "a7affebce7e7529b31782368cd47af6683131547e91202c19d55e3e9f405001b",
+  "signing_workflow_sha256": "2879a4c245ae84d6816ce3017d96b4b66a55bc77b74644915f46874d2e4716e3",
   "oidc_issuer": "https://token.actions.githubusercontent.com",
   "required_ref": "refs/heads/main",
   "reviewer": "kazan555",
