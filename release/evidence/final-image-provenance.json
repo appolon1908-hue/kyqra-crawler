@@ -1,10 +1,33 @@
 {
-  "buildType": "codestra/docker-local-exact-merge",
-  "subject": {
-    "commit": "a9d59681a7857795adc086d2464859674901e393",
-    "image_id": "sha256:1d918aa99ce19a7831baafdf428f3323abf8134472c2a5f202a60a84181e15e0"
+  "buildDefinition": {
+    "buildType": "https://codestra.co/build-types/docker-local-exact-merge/v1",
+    "externalParameters": {
+      "repository": "https://github.com/appolon1908-hue/kyqra-crawler",
+      "sourceCommit": "a9d59681a7857795adc086d2464859674901e393",
+      "registryImage": "ghcr.io/appolon1908-hue/kyqra-crawler",
+      "registryDigest": "sha256:1d918aa99ce19a7831baafdf428f3323abf8134472c2a5f202a60a84181e15e0",
+      "linuxAmd64PlatformDigest": "sha256:b5ad0fe7aed3d7de20e882d8f84295485b4d85c2ab54229895e46689fdf4484e"
+    },
+    "internalParameters": {
+      "reproducibleInputs": true,
+      "registryPublication": "blocked_missing_write_packages_scope"
+    },
+    "resolvedDependencies": [
+      {
+        "uri": "git+https://github.com/appolon1908-hue/kyqra-crawler@refs/tags/kyqra-mtls-staging-20260820",
+        "digest": {
+          "gitCommit": "a9d59681a7857795adc086d2464859674901e393"
+        }
+      }
+    ]
   },
-  "source": "https://github.com/appolon1908-hue/kyqra-crawler",
-  "reproducible_inputs": true,
-  "registry_publication": "blocked_missing_write_packages_scope"
+  "runDetails": {
+    "builder": {
+      "id": "https://github.com/appolon1908-hue/kyqra-crawler/actions"
+    },
+    "metadata": {
+      "invocationId": "kyqra-mtls-staging-20260820"
+    },
+    "byproducts": []
+  }
 }

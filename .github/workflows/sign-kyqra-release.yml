@@ -47,8 +47,8 @@ jobs:
           gzip -dc release/evidence/final-image-sbom.spdx.json.gz > "$RUNNER_TEMP/final-image-sbom.spdx.json"
           test "$(sha256sum "$RUNNER_TEMP/final-image-sbom.spdx.json" | cut -d' ' -f1)" = "$(jq -r .sbom_sha256 release/kyqra-mtls-staging-20260820.json)"
           test "$(sha256sum release/evidence/final-image-provenance.json | cut -d' ' -f1)" = "$(jq -r .provenance_sha256 release/kyqra-mtls-staging-20260820.json)"
-          test "$(jq -r .subject.commit release/evidence/final-image-provenance.json)" = "a9d59681a7857795adc086d2464859674901e393"
-          test "$(jq -r .subject.image_id release/evidence/final-image-provenance.json)" = "sha256:1d918aa99ce19a7831baafdf428f3323abf8134472c2a5f202a60a84181e15e0"
+          test "$(jq -r .buildDefinition.externalParameters.sourceCommit release/evidence/final-image-provenance.json)" = "a9d59681a7857795adc086d2464859674901e393"
+          test "$(jq -r .buildDefinition.externalParameters.registryDigest release/evidence/final-image-provenance.json)" = "sha256:1d918aa99ce19a7831baafdf428f3323abf8134472c2a5f202a60a84181e15e0"
 
       - name: Attest immutable release signature
         id: signature

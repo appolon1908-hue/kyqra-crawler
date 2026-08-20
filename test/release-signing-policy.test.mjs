@@ -30,3 +30,16 @@ test('workflow pins protected ref, tag, source and registry subjects', () => {
   assert.match(workflow, /a9d59681a7857795adc086d2464859674901e393/);
   assert.match(workflow, /sha256:1d918aa99ce19a7831baafdf428f3323abf8134472c2a5f202a60a84181e15e0/);
 });
+
+test('provenance is a SLSA v1 predicate', () => {
+  const provenance = JSON.parse(
+    fs.readFileSync('release/evidence/final-image-provenance.json', 'utf8'),
+  );
+  assert.ok(provenance.buildDefinition);
+  assert.ok(provenance.runDetails?.builder?.id);
+  assert.equal(provenance.buildDefinition.externalParameters.sourceCommit, manifest.source_commit);
+  assert.equal(
+    provenance.buildDefinition.externalParameters.registryDigest,
+    manifest.registry_digest,
+  );
+});
