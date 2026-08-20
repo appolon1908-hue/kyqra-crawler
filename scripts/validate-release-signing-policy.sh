@@ -18,6 +18,7 @@ test "$(grep -Ec '^  workflow_dispatch:$' "$workflow")" = 1
 test "$(grep -Ec 'uses: [a-z0-9-]+/[a-z0-9-]+@[0-9a-f]{40}$' "$workflow")" = 3
 test "$(grep -Fc 'sha256:1d918aa99ce19a7831baafdf428f3323abf8134472c2a5f202a60a84181e15e0' "$workflow")" = 4
 grep -Fq 'cosign sign --yes "$IMAGE"' "$workflow"
-grep -Fq 'cosign attest --yes --type slsaprovenance' "$workflow"
+grep -Fq 'cosign attest --yes --type slsaprovenance1' "$workflow"
+grep -Fq 'cosign verify-attestation --type slsaprovenance1' "$workflow"
 grep -Fq 'cosign attest --yes --type spdxjson' "$workflow"
 grep -Fq 'https://token.actions.githubusercontent.com' "$workflow"

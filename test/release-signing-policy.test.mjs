@@ -34,7 +34,8 @@ test('workflow pins protected ref, tag, source and registry subjects', () => {
 
 test('private-repository fallback pins Cosign OIDC identity', () => {
   assert.match(workflow, /cosign sign --yes "\$IMAGE"/);
-  assert.match(workflow, /cosign attest --yes --type slsaprovenance/);
+  assert.match(workflow, /cosign attest --yes --type slsaprovenance1/);
+  assert.match(workflow, /cosign verify-attestation --type slsaprovenance1/);
   assert.match(workflow, /cosign attest --yes --type spdxjson/);
   assert.match(workflow, /https:\/\/token\.actions\.githubusercontent\.com/);
   assert.match(workflow, /sign-kyqra-release\.yml@refs\/heads\/main/);

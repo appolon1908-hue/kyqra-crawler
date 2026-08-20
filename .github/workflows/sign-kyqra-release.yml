@@ -65,7 +65,7 @@ jobs:
         run: |
           set -euo pipefail
           cosign sign --yes "$IMAGE"
-          cosign attest --yes --type slsaprovenance --predicate release/evidence/final-image-provenance.json "$IMAGE"
+          cosign attest --yes --type slsaprovenance1 --predicate release/evidence/final-image-provenance.json "$IMAGE"
           cosign attest --yes --type spdxjson --predicate "$RUNNER_TEMP/final-image-sbom.spdx.json" "$IMAGE"
 
       - name: Verify exact GitHub OIDC signing identity
@@ -77,7 +77,7 @@ jobs:
         run: |
           set -euo pipefail
           cosign verify --certificate-identity "$IDENTITY" --certificate-oidc-issuer "$ISSUER" "$IMAGE" > "$RUNNER_TEMP/signature-verification.json"
-          cosign verify-attestation --type slsaprovenance --certificate-identity "$IDENTITY" --certificate-oidc-issuer "$ISSUER" "$IMAGE" > "$RUNNER_TEMP/provenance-verification.json"
+          cosign verify-attestation --type slsaprovenance1 --certificate-identity "$IDENTITY" --certificate-oidc-issuer "$ISSUER" "$IMAGE" > "$RUNNER_TEMP/provenance-verification.json"
           cosign verify-attestation --type spdxjson --certificate-identity "$IDENTITY" --certificate-oidc-issuer "$ISSUER" "$IMAGE" > "$RUNNER_TEMP/sbom-verification.json"
           jq -e 'length > 0' "$RUNNER_TEMP/signature-verification.json"
           jq -e 'length > 0' "$RUNNER_TEMP/provenance-verification.json"
