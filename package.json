@@ -14,7 +14,8 @@
     "test:unit": "node --test test/unit.test.mjs",
     "test:integration": "node --test test/integration.test.mjs",
     "test:security": "node --test test/security.test.mjs",
-    "test:policy": "node --test test/policy.test.mjs"
+    "test:policy": "node --test test/policy.test.mjs test/release-signing-policy.test.mjs",
+    "test:release-signing": "node --test test/release-signing-policy.test.mjs && ./scripts/validate-release-signing-policy.sh"
   },
   "dependencies": {
     "@crawlee/cheerio": "3.18.1",

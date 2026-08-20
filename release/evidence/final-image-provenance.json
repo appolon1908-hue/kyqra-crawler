@@ -1,0 +1,10 @@
+{
+  "buildType": "codestra/docker-local-exact-merge",
+  "subject": {
+    "commit": "a9d59681a7857795adc086d2464859674901e393",
+    "image_id": "sha256:1d918aa99ce19a7831baafdf428f3323abf8134472c2a5f202a60a84181e15e0"
+  },
+  "source": "https://github.com/appolon1908-hue/kyqra-crawler",
+  "reproducible_inputs": true,
+  "registry_publication": "blocked_missing_write_packages_scope"
+}
