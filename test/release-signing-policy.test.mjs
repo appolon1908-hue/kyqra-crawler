@@ -22,6 +22,7 @@ test('workflow exposes no digest or commit override', () => {
   assert.match(workflow, /workflow_dispatch:\s*\n/);
   assert.doesNotMatch(workflow, /\n\s+inputs:/);
   assert.doesNotMatch(workflow, /pull-requests:\s*write|contents:\s*write|issues:\s*write/);
+  assert.doesNotMatch(workflow, /attestations:\s*write|artifact-metadata:\s*write/);
 });
 
 test('workflow pins protected ref, tag, source and registry subjects', () => {
@@ -29,6 +30,14 @@ test('workflow pins protected ref, tag, source and registry subjects', () => {
   assert.match(workflow, /kyqra-mtls-staging-20260820\^\{commit\}/);
   assert.match(workflow, /a9d59681a7857795adc086d2464859674901e393/);
   assert.match(workflow, /sha256:1d918aa99ce19a7831baafdf428f3323abf8134472c2a5f202a60a84181e15e0/);
+});
+
+test('private-repository fallback pins Cosign OIDC identity', () => {
+  assert.match(workflow, /cosign sign --yes "\$IMAGE"/);
+  assert.match(workflow, /cosign attest --yes --type slsaprovenance/);
+  assert.match(workflow, /cosign attest --yes --type spdxjson/);
+  assert.match(workflow, /https:\/\/token\.actions\.githubusercontent\.com/);
+  assert.match(workflow, /sign-kyqra-release\.yml@refs\/heads\/main/);
 });
 
 test('provenance is a SLSA v1 predicate', () => {
