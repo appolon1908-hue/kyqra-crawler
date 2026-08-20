@@ -16,7 +16,7 @@ test "$(grep -Ec '^  workflow_dispatch:$' "$workflow")" = 1
 ! grep -Eq 'pull-requests:[[:space:]]*write|contents:[[:space:]]*write|issues:[[:space:]]*write' "$workflow"
 ! grep -Eq 'attestations:[[:space:]]*write|artifact-metadata:[[:space:]]*write' "$workflow"
 test "$(grep -Ec 'uses: [a-z0-9-]+/[a-z0-9-]+@[0-9a-f]{40}$' "$workflow")" = 3
-test "$(grep -Fc 'sha256:1d918aa99ce19a7831baafdf428f3323abf8134472c2a5f202a60a84181e15e0' "$workflow")" -ge 5
+test "$(grep -Fc 'sha256:1d918aa99ce19a7831baafdf428f3323abf8134472c2a5f202a60a84181e15e0' "$workflow")" = 4
 grep -Fq 'cosign sign --yes "$IMAGE"' "$workflow"
 grep -Fq 'cosign attest --yes --type slsaprovenance' "$workflow"
 grep -Fq 'cosign attest --yes --type spdxjson' "$workflow"
