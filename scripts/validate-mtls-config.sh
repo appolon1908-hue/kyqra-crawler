@@ -10,4 +10,3 @@ grep -Fq 'ssl_client_serial' "$file"
 grep -Fq 'ssl_protocols TLSv1.2 TLSv1.3;' "$file"
 grep -Fq 'proxy_pass http://127.0.0.1:3100;' "$file"
 echo 'MTLS_CONFIGURATION_TESTS=PASS'
-
