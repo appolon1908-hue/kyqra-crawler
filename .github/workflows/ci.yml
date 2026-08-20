@@ -130,14 +130,11 @@ jobs:
           output-file: sbom.spdx.json
           upload-artifact: false
       - name: Scan exact image
-        uses: aquasecurity/trivy-action@dc5a429b52fcf669ce959baa2c2dd26090d2a6c4
-        with:
-          image-ref: kyqra-ci:${{ github.sha }}
-          scanners: vuln
-          severity: HIGH,CRITICAL
-          exit-code: '1'
-          format: json
-          output: trivy.json
+        run: >-
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock
+          aquasec/trivy:0.72.0@sha256:cffe3f5161a47a6823fbd23d985795b3ed72a4c806da4c4df16266c02accdd6f
+          image --scanners vuln --severity HIGH,CRITICAL --exit-code 1
+          --no-progress --format json kyqra-ci:${{ github.sha }} > trivy.json
       - run: test "$(jq '[.Results[].Vulnerabilities[]?] | length' trivy.json)" = 0
       - name: Verify non-root image metadata
         run: |
