@@ -23,6 +23,12 @@ test('backend is loopback-only and data stores are unpublished', () => {
   assert.doesNotMatch(compose, /ports:\s*\[[^\]]*(5432|6379)/);
 });
 
+test('api receives tenant-bound principals through a read-only Docker secret', () => {
+  assert.match(compose, /KYQRA_SERVICE_PRINCIPALS_FILE: \/run\/secrets\/kyqra_service_principals/);
+  assert.match(compose, /secrets: \[kyqra_service_principals\]/);
+  assert.doesNotMatch(compose, /API_KEY:/);
+});
+
 test('container is non-root and every image reference is immutable', () => {
   assert.match(dockerfile, /USER pwuser/);
   assert.match(dockerfile, /FROM .*@sha256:[0-9a-f]{64}/);
