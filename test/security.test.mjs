@@ -16,11 +16,22 @@ const installer = readFileSync(
   new URL('../scripts/codestra-kyqra-remediation-admin.in', import.meta.url),
   'utf8',
 );
+const source = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
 
 test('backend is loopback-only and data stores are unpublished', () => {
   assert.match(compose, /127\.0\.0\.1:3100:3000/);
   assert.doesNotMatch(compose, /10\.40\.0\.4:3100:3000|0\.0\.0\.0:3100|3100:3000"\]/);
   assert.doesNotMatch(compose, /ports:\s*\[[^\]]*(5432|6379)/);
+});
+
+test('api receives tenant-bound principals through a read-only Docker secret', () => {
+  assert.match(compose, /KYQRA_SERVICE_PRINCIPALS_FILE: \/run\/secrets\/kyqra_service_principals/);
+  assert.match(compose, /secrets: \[kyqra_service_principals\]/);
+  assert.match(
+    compose,
+    /group_add: \['\$\{KYQRA_SECRETS_GID:\?set the host kyqra-secrets group id\}'\]/,
+  );
+  assert.doesNotMatch(compose, /API_KEY:/);
 });
 
 test('container is non-root and every image reference is immutable', () => {
@@ -37,6 +48,19 @@ test('private gateway requires exact client identity and modern TLS', () => {
   assert.match(privateNginx, /ssl_client_serial/);
   assert.match(privateNginx, /ssl_protocols TLSv1\.2 TLSv1\.3/);
   assert.match(privateNginx, /proxy_pass http:\/\/127\.0\.0\.1:3100/);
+});
+
+test('callback delivery pins a freshly validated destination and signs the full request', () => {
+  assert.match(source, /await dns\.lookup\(hostname, \{ all: true, verbatim: true \}\)/);
+  assert.match(source, /new Agent\(\{/);
+  assert.match(source, /lookup: \(_hostname, options, callback\)/);
+  assert.match(
+    source,
+    /\['v1', method\.toUpperCase\(\), normalizedPath, timestamp, eventId, source, bodyHash\]/,
+  );
+  assert.match(source, /'x-kyqra-signature-version': 'v1'/);
+  assert.doesNotMatch(source, /redirect:\s*['"]follow['"]/);
+  assert.match(source, /signal: AbortSignal\.timeout\(30000\)/);
 });
 
 test('repository contains no private key file', () => {
@@ -70,4 +94,9 @@ test('installer fixes managed paths and rejects arbitrary arguments', () => {
   assert.match(installer, /RELEASE_SYMLINK_DENIED/);
   assert.match(installer, /RELEASE_SIGNATURE_INVALID/);
   assert.match(installer, /automatic-rollback/);
+  assert.match(installer, /verify_principals/);
+  assert.match(installer, /PRINCIPAL_REGISTRY_MODE_INVALID/);
+  assert.match(installer, /KYQRA_SERVICE_PRINCIPALS_FILE="\$PRINCIPALS"/);
+  assert.match(installer, /chown root:"\$PRINCIPALS_GROUP" "\$PRINCIPALS"/);
+  assert.match(installer, /chmod 0640 "\$PRINCIPALS"/);
 });

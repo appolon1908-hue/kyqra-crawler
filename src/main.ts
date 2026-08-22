@@ -3,6 +3,10 @@ import { Queue, Worker, Job } from 'bullmq';
 import { Redis } from 'ioredis';
 import pg from 'pg';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import dns from 'node:dns/promises';
+import net from 'node:net';
+import { Agent, request } from 'undici';
 import { CheerioCrawler } from '@crawlee/cheerio';
 import { PlaywrightCrawler } from '@crawlee/playwright';
 import { RequestQueue } from '@crawlee/core';
@@ -50,9 +54,73 @@ const allow = (s: string) => {
     a.some((x) => u.hostname === x || u.hostname.endsWith('.' + x))
   );
 };
+const prohibitedAddress = (address: string) => {
+  if (address === '10.40.0.1') return false;
+  if (net.isIPv4(address)) {
+    const p = address.split('.').map(Number);
+    return (
+      p[0] === 0 ||
+      p[0] === 10 ||
+      p[0] === 127 ||
+      (p[0] === 100 && p[1] >= 64 && p[1] <= 127) ||
+      (p[0] === 169 && p[1] === 254) ||
+      (p[0] === 172 && p[1] >= 16 && p[1] <= 31) ||
+      (p[0] === 192 && p[1] === 0 && p[2] === 0) ||
+      (p[0] === 192 && p[1] === 168) ||
+      (p[0] === 198 && (p[1] === 18 || p[1] === 19 || p[1] === 51)) ||
+      (p[0] === 203 && p[1] === 0 && p[2] === 113) ||
+      p[0] >= 224
+    );
+  }
+  const value = address.toLowerCase();
+  if (value.startsWith('::ffff:')) return prohibitedAddress(value.slice(7));
+  return (
+    value === '::' ||
+    value === '::1' ||
+    value.startsWith('fc') ||
+    value.startsWith('fd') ||
+    value.startsWith('fe8') ||
+    value.startsWith('fe9') ||
+    value.startsWith('fea') ||
+    value.startsWith('feb') ||
+    value.startsWith('2001:db8:')
+  );
+};
+async function pinnedCallbackAgent(rawUrl: string) {
+  if (!allow(rawUrl)) throw Error('callback_not_allowed');
+  const hostname = new URL(rawUrl).hostname;
+  const resolved = net.isIP(hostname)
+    ? [{ address: hostname, family: net.isIPv4(hostname) ? 4 : 6 }]
+    : await dns.lookup(hostname, { all: true, verbatim: true });
+  if (!resolved.length || resolved.some((item) => prohibitedAddress(item.address)))
+    throw Error('callback_destination_rejected');
+  const pinned = resolved[0];
+  return new Agent({
+    connect: {
+      lookup: (_hostname, options, callback) => {
+        if (options.all) callback(null, [pinned]);
+        else callback(null, pinned.address, pinned.family);
+      },
+    },
+  });
+}
+const callbackSignatureInput = (
+  method: string,
+  path: string,
+  timestamp: string,
+  eventId: string,
+  source: string,
+  body: string,
+) => {
+  const normalizedPath = '/' + path.split('/').filter(Boolean).join('/');
+  const bodyHash = crypto.createHash('sha256').update(body).digest('hex');
+  return ['v1', method.toUpperCase(), normalizedPath, timestamp, eventId, source, bodyHash].join(
+    '\n',
+  );
+};
 async function init() {
   await db.query(
-    `CREATE TABLE IF NOT EXISTS jobs(id uuid primary key,status text,payload jsonb,progress jsonb default '{}',error text,created_at timestamptz default now(),updated_at timestamptz default now());CREATE TABLE IF NOT EXISTS results(id bigserial primary key,job_id uuid references jobs(id) on delete cascade,url text,url_hash text,data jsonb,provenance jsonb,created_at timestamptz default now(),unique(job_id,url_hash));CREATE TABLE IF NOT EXISTS job_requests(job_id uuid primary key references jobs(id) on delete cascade,idempotency_key text unique not null,request_hash text not null,correlation_id text not null,tenant_id text);ALTER TABLE job_requests ADD COLUMN IF NOT EXISTS tenant_id text;CREATE INDEX IF NOT EXISTS results_job ON results(job_id)`,
+    `CREATE TABLE IF NOT EXISTS jobs(id uuid primary key,status text,payload jsonb,progress jsonb default '{}',error text,created_at timestamptz default now(),updated_at timestamptz default now());CREATE TABLE IF NOT EXISTS results(id bigserial primary key,job_id uuid references jobs(id) on delete cascade,url text,url_hash text,data jsonb,provenance jsonb,created_at timestamptz default now(),unique(job_id,url_hash));CREATE TABLE IF NOT EXISTS job_requests(job_id uuid primary key references jobs(id) on delete cascade,idempotency_key text not null,request_hash text not null,correlation_id text not null,tenant_id text not null);ALTER TABLE job_requests ADD COLUMN IF NOT EXISTS tenant_id text;ALTER TABLE job_requests ALTER COLUMN tenant_id SET NOT NULL;ALTER TABLE job_requests DROP CONSTRAINT IF EXISTS job_requests_idempotency_key_key;CREATE UNIQUE INDEX IF NOT EXISTS job_requests_tenant_idempotency ON job_requests(tenant_id,idempotency_key);CREATE INDEX IF NOT EXISTS results_job ON results(job_id)`,
   );
 }
 function data($: any, url: string) {
@@ -206,11 +274,33 @@ async function crawl(job: Job) {
     throw e;
   }
 }
+type ServicePrincipal = {
+  key_sha256: string;
+  tenant_id: string;
+  client_id: string;
+  roles?: string[];
+  enabled: boolean;
+};
+const principals = (): ServicePrincipal[] => {
+  const path = process.env.KYQRA_SERVICE_PRINCIPALS_FILE || '';
+  if (!path) return [];
+  const value = JSON.parse(fs.readFileSync(path, 'utf8'));
+  return Array.isArray(value.principals) ? value.principals : [];
+};
 const auth = (r: any, x: any, d: any) => {
-  let v = String(r.headers.authorization || '').replace(/^Bearer /, ''),
-    e = process.env.API_KEY || '';
-  if (!e || v.length !== e.length || !crypto.timingSafeEqual(Buffer.from(v), Buffer.from(e)))
-    return x.code(401).send({ error: 'unauthorized' });
+  const token = String(r.headers.authorization || '').replace(/^Bearer /, '');
+  const digest = crypto.createHash('sha256').update(token).digest('hex');
+  const matches = principals().filter(
+    (item) =>
+      item.enabled &&
+      item.key_sha256.length === digest.length &&
+      crypto.timingSafeEqual(Buffer.from(item.key_sha256), Buffer.from(digest)),
+  );
+  if (!token || matches.length !== 1) return x.code(401).send({ error: 'unauthorized' });
+  const claimedTenant = String(r.headers['x-tenant-id'] || '');
+  if (claimedTenant && claimedTenant !== matches[0].tenant_id)
+    return x.code(403).send({ error: 'tenant_claim_mismatch' });
+  r.servicePrincipal = matches[0];
   d();
 };
 async function api() {
@@ -237,13 +327,13 @@ async function api() {
       return x.code(400).send({ error: 'callback_not_allowed' });
     let idempotencyKey = String(r.headers['idempotency-key'] || ''),
       correlationId = String(r.headers['x-correlation-id'] || ''),
-      tenantId = String(r.headers['x-tenant-id'] || '');
-    if (!idempotencyKey || !correlationId || !tenantId)
-      return x.code(400).send({ error: 'idempotency_correlation_and_tenant_required' });
+      tenantId = String(r.servicePrincipal.tenant_id);
+    if (!idempotencyKey || !correlationId)
+      return x.code(400).send({ error: 'idempotency_and_correlation_required' });
     let requestHash = crypto.createHash('sha256').update(JSON.stringify(v.data)).digest('hex'),
       prior = await db.query(
-        'select job_id,request_hash,correlation_id from job_requests where idempotency_key=$1',
-        [idempotencyKey],
+        'select job_id,request_hash,correlation_id from job_requests where tenant_id=$1 and idempotency_key=$2',
+        [tenantId, idempotencyKey],
       );
     if (prior.rowCount) {
       if (prior.rows[0].request_hash !== requestHash)
@@ -281,16 +371,21 @@ async function api() {
   });
   a.get('/api/v1/jobs/:id', async (r: any, x) => {
     let z = await db.query(
-      'select j.id,j.status,j.progress,j.error,j.created_at,j.updated_at,m.correlation_id from jobs j left join job_requests m on m.job_id=j.id where j.id=$1',
-      [r.params.id],
+      'select j.id,j.status,j.progress,j.error,j.created_at,j.updated_at,m.correlation_id from jobs j join job_requests m on m.job_id=j.id where j.id=$1 and m.tenant_id=$2',
+      [r.params.id, r.servicePrincipal.tenant_id],
     );
     return z.rowCount ? z.rows[0] : x.code(404).send({ error: 'not_found' });
   });
   a.get('/api/v1/jobs/:id/results', async (r: any, x) => {
-    let z = await db.query('select data,provenance from results where job_id=$1 order by id', [
-        r.params.id,
-      ]),
-      m = await db.query('select correlation_id from job_requests where job_id=$1', [r.params.id]);
+    const m = await db.query(
+      'select correlation_id from job_requests where job_id=$1 and tenant_id=$2',
+      [r.params.id, r.servicePrincipal.tenant_id],
+    );
+    if (!m.rowCount) return x.code(404).send({ error: 'not_found' });
+    let z = await db.query(
+      'select r.data,r.provenance from results r join job_requests m on m.job_id=r.job_id where r.job_id=$1 and m.tenant_id=$2 order by r.id',
+      [r.params.id, r.servicePrincipal.tenant_id],
+    );
     if (r.query?.format === 'csv') {
       x.type('text/csv');
       let e = (v: any) => '"' + String(v ?? '').replaceAll('"', '""') + '"';
@@ -319,18 +414,26 @@ async function api() {
     };
   });
   a.post('/api/v1/jobs/:id/cancel', async (r: any, x) => {
+    const owned = await db.query('select 1 from job_requests where job_id=$1 and tenant_id=$2', [
+      r.params.id,
+      r.servicePrincipal.tenant_id,
+    ]);
+    if (!owned.rowCount) return x.code(404).send({ error: 'not_found' });
     let j = await q.getJob(r.params.id);
     if (j) await j.remove().catch(() => {});
     let z = await db.query(
-      "update jobs set status='cancelled',updated_at=now() where id=$1 returning id",
-      [r.params.id],
+      "update jobs j set status='cancelled',updated_at=now() from job_requests m where j.id=$1 and m.job_id=j.id and m.tenant_id=$2 returning j.id",
+      [r.params.id, r.servicePrincipal.tenant_id],
     );
     return z.rowCount
       ? { id: r.params.id, status: 'cancelled' }
       : x.code(404).send({ error: 'not_found' });
   });
   a.post('/api/v1/jobs/:id/retry', async (r: any, x) => {
-    let z = await db.query('select payload from jobs where id=$1', [r.params.id]);
+    let z = await db.query(
+      'select j.payload from jobs j join job_requests m on m.job_id=j.id where j.id=$1 and m.tenant_id=$2',
+      [r.params.id, r.servicePrincipal.tenant_id],
+    );
     if (!z.rowCount) return x.code(404).send({ error: 'not_found' });
     let old = await q.getJob(r.params.id);
     if (old) await old.remove().catch(() => {});
@@ -340,13 +443,17 @@ async function api() {
     await q.add('crawl', z.rows[0].payload, { jobId: r.params.id });
     return x.code(202).send({ id: r.params.id, status: 'accepted' });
   });
-  a.get('/api/v1/stats', async () => ({
-    queue: await q.getJobCounts(),
-    workers: {
-      http: +(process.env.HTTP_CONCURRENCY || 15),
-      browser: +(process.env.BROWSER_CONCURRENCY || 3),
-    },
-  }));
+  a.get('/api/v1/stats', async (r: any, x) => {
+    if (!r.servicePrincipal.roles?.includes('operations'))
+      return x.code(403).send({ error: 'forbidden' });
+    return {
+      queue: await q.getJobCounts(),
+      workers: {
+        http: +(process.env.HTTP_CONCURRENCY || 15),
+        browser: +(process.env.BROWSER_CONCURRENCY || 3),
+      },
+    };
+  });
   a.post('/api/v1/webhooks/test', async (r: any, x) => {
     if (!r.body?.url || !allow(r.body.url))
       return x.code(400).send({ error: 'callback_not_allowed' });
@@ -363,25 +470,43 @@ function callbacks() {
       let body = JSON.stringify(j.data.payload || {}),
         timestamp = String(Math.floor(Date.now() / 1000)),
         eventId = String(j.id || crypto.randomUUID()),
-        canonical = timestamp + '\n' + eventId + '\nkyqra\n' + body,
+        target = new URL(j.data.url),
+        canonical = callbackSignatureInput(
+          'POST',
+          target.pathname,
+          timestamp,
+          eventId,
+          'kyqra',
+          body,
+        ),
         sig = crypto
           .createHmac('sha256', process.env.KYQRA_WEBHOOK_SECRET || '')
           .update(canonical)
           .digest('hex'),
-        r = await fetch(j.data.url, {
+        dispatcher = await pinnedCallbackAgent(j.data.url);
+      try {
+        const r = await request(j.data.url, {
+          dispatcher,
           method: 'POST',
+          headersTimeout: 15000,
+          bodyTimeout: 15000,
+          signal: AbortSignal.timeout(30000),
           headers: {
             'content-type': 'application/json',
             authorization: 'Bearer ' + (process.env.KYQRA_MIDDLEWARE_API_KEY || ''),
             'x-source-system': 'kyqra',
+            'x-kyqra-signature-version': 'v1',
             'x-kyqra-timestamp': timestamp,
             'x-kyqra-event-id': eventId,
             'x-kyqra-signature': 'sha256=' + sig,
           },
           body,
-          signal: AbortSignal.timeout(15000),
         });
-      if (!r.ok) throw Error('callback ' + r.status);
+        await r.body.dump();
+        if (r.statusCode < 200 || r.statusCode >= 300) throw Error('callback ' + r.statusCode);
+      } finally {
+        await dispatcher.close();
+      }
     },
     { connection: ro, concurrency: 3 },
   );

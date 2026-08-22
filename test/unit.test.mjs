@@ -19,8 +19,21 @@ test('middleware callbacks are signed and replay-addressable', () => {
     assert.ok(source.includes(marker), marker);
 });
 
-test('job submissions require idempotency, correlation and tenant', () => {
-  for (const marker of ['idempotency-key', 'x-correlation-id', 'x-tenant-id']) {
+test('job submissions bind idempotency and every operation to authenticated tenant', () => {
+  for (const marker of [
+    'idempotency-key',
+    'x-correlation-id',
+    'KYQRA_SERVICE_PRINCIPALS_FILE',
+    'servicePrincipal.tenant_id',
+    'job_requests_tenant_idempotency',
+    'where job_id=$1 and tenant_id=$2',
+    'm.tenant_id=$2',
+  ]) {
     assert.ok(source.includes(marker), marker);
   }
+  assert.ok(
+    source.split('m.tenant_id=$2').length >= 4,
+    'status/results/cancel/retry tenant filters',
+  );
+  assert.doesNotMatch(source, /tenantId = String\(r\.headers\['x-tenant-id'\]/);
 });

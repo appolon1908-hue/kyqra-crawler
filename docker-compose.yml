@@ -15,6 +15,9 @@ services:
       REDIS_HOST: redis
       DATABASE_URL: postgresql://crawler:${POSTGRES_PASSWORD}@postgres:5432/crawler
       ROLE: api
+      KYQRA_SERVICE_PRINCIPALS_FILE: /run/secrets/kyqra_service_principals
+    secrets: [kyqra_service_principals]
+    group_add: ['${KYQRA_SECRETS_GID:?set the host kyqra-secrets group id}']
     ports: ['127.0.0.1:3100:3000']
     networks: [backend, frontend]
     depends_on:
@@ -105,3 +108,6 @@ networks:
 volumes:
   redis:
   postgres:
+secrets:
+  kyqra_service_principals:
+    file: '${KYQRA_SERVICE_PRINCIPALS_FILE:?set the root-owned service principal registry path}'
