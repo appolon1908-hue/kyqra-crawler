@@ -4,6 +4,9 @@ import { Redis } from 'ioredis';
 import pg from 'pg';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import dns from 'node:dns/promises';
+import net from 'node:net';
+import { Agent, request } from 'undici';
 import { CheerioCrawler } from '@crawlee/cheerio';
 import { PlaywrightCrawler } from '@crawlee/playwright';
 import { RequestQueue } from '@crawlee/core';
@@ -49,6 +52,70 @@ const allow = (s: string) => {
   return (
     (u.protocol === 'https:' || (u.protocol === 'http:' && u.hostname === '10.40.0.1')) &&
     a.some((x) => u.hostname === x || u.hostname.endsWith('.' + x))
+  );
+};
+const prohibitedAddress = (address: string) => {
+  if (address === '10.40.0.1') return false;
+  if (net.isIPv4(address)) {
+    const p = address.split('.').map(Number);
+    return (
+      p[0] === 0 ||
+      p[0] === 10 ||
+      p[0] === 127 ||
+      (p[0] === 100 && p[1] >= 64 && p[1] <= 127) ||
+      (p[0] === 169 && p[1] === 254) ||
+      (p[0] === 172 && p[1] >= 16 && p[1] <= 31) ||
+      (p[0] === 192 && p[1] === 0 && p[2] === 0) ||
+      (p[0] === 192 && p[1] === 168) ||
+      (p[0] === 198 && (p[1] === 18 || p[1] === 19 || p[1] === 51)) ||
+      (p[0] === 203 && p[1] === 0 && p[2] === 113) ||
+      p[0] >= 224
+    );
+  }
+  const value = address.toLowerCase();
+  if (value.startsWith('::ffff:')) return prohibitedAddress(value.slice(7));
+  return (
+    value === '::' ||
+    value === '::1' ||
+    value.startsWith('fc') ||
+    value.startsWith('fd') ||
+    value.startsWith('fe8') ||
+    value.startsWith('fe9') ||
+    value.startsWith('fea') ||
+    value.startsWith('feb') ||
+    value.startsWith('2001:db8:')
+  );
+};
+async function pinnedCallbackAgent(rawUrl: string) {
+  if (!allow(rawUrl)) throw Error('callback_not_allowed');
+  const hostname = new URL(rawUrl).hostname;
+  const resolved = net.isIP(hostname)
+    ? [{ address: hostname, family: net.isIPv4(hostname) ? 4 : 6 }]
+    : await dns.lookup(hostname, { all: true, verbatim: true });
+  if (!resolved.length || resolved.some((item) => prohibitedAddress(item.address)))
+    throw Error('callback_destination_rejected');
+  const pinned = resolved[0];
+  return new Agent({
+    connect: {
+      lookup: (_hostname, options, callback) => {
+        if (options.all) callback(null, [pinned]);
+        else callback(null, pinned.address, pinned.family);
+      },
+    },
+  });
+}
+const callbackSignatureInput = (
+  method: string,
+  path: string,
+  timestamp: string,
+  eventId: string,
+  source: string,
+  body: string,
+) => {
+  const normalizedPath = '/' + path.split('/').filter(Boolean).join('/');
+  const bodyHash = crypto.createHash('sha256').update(body).digest('hex');
+  return ['v1', method.toUpperCase(), normalizedPath, timestamp, eventId, source, bodyHash].join(
+    '\n',
   );
 };
 async function init() {
@@ -403,25 +470,42 @@ function callbacks() {
       let body = JSON.stringify(j.data.payload || {}),
         timestamp = String(Math.floor(Date.now() / 1000)),
         eventId = String(j.id || crypto.randomUUID()),
-        canonical = timestamp + '\n' + eventId + '\nkyqra\n' + body,
+        target = new URL(j.data.url),
+        canonical = callbackSignatureInput(
+          'POST',
+          target.pathname,
+          timestamp,
+          eventId,
+          'kyqra',
+          body,
+        ),
         sig = crypto
           .createHmac('sha256', process.env.KYQRA_WEBHOOK_SECRET || '')
           .update(canonical)
           .digest('hex'),
-        r = await fetch(j.data.url, {
+        dispatcher = await pinnedCallbackAgent(j.data.url);
+      try {
+        const r = await request(j.data.url, {
+          dispatcher,
           method: 'POST',
+          headersTimeout: 15000,
+          bodyTimeout: 15000,
           headers: {
             'content-type': 'application/json',
             authorization: 'Bearer ' + (process.env.KYQRA_MIDDLEWARE_API_KEY || ''),
             'x-source-system': 'kyqra',
+            'x-kyqra-signature-version': 'v1',
             'x-kyqra-timestamp': timestamp,
             'x-kyqra-event-id': eventId,
             'x-kyqra-signature': 'sha256=' + sig,
           },
           body,
-          signal: AbortSignal.timeout(15000),
         });
-      if (!r.ok) throw Error('callback ' + r.status);
+        await r.body.dump();
+        if (r.statusCode < 200 || r.statusCode >= 300) throw Error('callback ' + r.statusCode);
+      } finally {
+        await dispatcher.close();
+      }
     },
     { connection: ro, concurrency: 3 },
   );

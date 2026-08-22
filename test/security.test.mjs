@@ -16,6 +16,7 @@ const installer = readFileSync(
   new URL('../scripts/codestra-kyqra-remediation-admin.in', import.meta.url),
   'utf8',
 );
+const source = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
 
 test('backend is loopback-only and data stores are unpublished', () => {
   assert.match(compose, /127\.0\.0\.1:3100:3000/);
@@ -43,6 +44,18 @@ test('private gateway requires exact client identity and modern TLS', () => {
   assert.match(privateNginx, /ssl_client_serial/);
   assert.match(privateNginx, /ssl_protocols TLSv1\.2 TLSv1\.3/);
   assert.match(privateNginx, /proxy_pass http:\/\/127\.0\.0\.1:3100/);
+});
+
+test('callback delivery pins a freshly validated destination and signs the full request', () => {
+  assert.match(source, /await dns\.lookup\(hostname, \{ all: true, verbatim: true \}\)/);
+  assert.match(source, /new Agent\(\{/);
+  assert.match(source, /lookup: \(_hostname, options, callback\)/);
+  assert.match(
+    source,
+    /\['v1', method\.toUpperCase\(\), normalizedPath, timestamp, eventId, source, bodyHash\]/,
+  );
+  assert.match(source, /'x-kyqra-signature-version': 'v1'/);
+  assert.doesNotMatch(source, /redirect:\s*['"]follow['"]/);
 });
 
 test('repository contains no private key file', () => {
