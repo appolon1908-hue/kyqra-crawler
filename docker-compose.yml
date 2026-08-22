@@ -17,6 +17,7 @@ services:
       ROLE: api
       KYQRA_SERVICE_PRINCIPALS_FILE: /run/secrets/kyqra_service_principals
     secrets: [kyqra_service_principals]
+    group_add: ['${KYQRA_SECRETS_GID:?set the host kyqra-secrets group id}']
     ports: ['127.0.0.1:3100:3000']
     networks: [backend, frontend]
     depends_on:

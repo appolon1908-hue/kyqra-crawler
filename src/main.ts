@@ -490,6 +490,7 @@ function callbacks() {
           method: 'POST',
           headersTimeout: 15000,
           bodyTimeout: 15000,
+          signal: AbortSignal.timeout(30000),
           headers: {
             'content-type': 'application/json',
             authorization: 'Bearer ' + (process.env.KYQRA_MIDDLEWARE_API_KEY || ''),

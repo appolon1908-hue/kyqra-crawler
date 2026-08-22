@@ -27,6 +27,10 @@ test('backend is loopback-only and data stores are unpublished', () => {
 test('api receives tenant-bound principals through a read-only Docker secret', () => {
   assert.match(compose, /KYQRA_SERVICE_PRINCIPALS_FILE: \/run\/secrets\/kyqra_service_principals/);
   assert.match(compose, /secrets: \[kyqra_service_principals\]/);
+  assert.match(
+    compose,
+    /group_add: \['\$\{KYQRA_SECRETS_GID:\?set the host kyqra-secrets group id\}'\]/,
+  );
   assert.doesNotMatch(compose, /API_KEY:/);
 });
 
@@ -56,6 +60,7 @@ test('callback delivery pins a freshly validated destination and signs the full 
   );
   assert.match(source, /'x-kyqra-signature-version': 'v1'/);
   assert.doesNotMatch(source, /redirect:\s*['"]follow['"]/);
+  assert.match(source, /signal: AbortSignal\.timeout\(30000\)/);
 });
 
 test('repository contains no private key file', () => {
@@ -92,4 +97,6 @@ test('installer fixes managed paths and rejects arbitrary arguments', () => {
   assert.match(installer, /verify_principals/);
   assert.match(installer, /PRINCIPAL_REGISTRY_MODE_INVALID/);
   assert.match(installer, /KYQRA_SERVICE_PRINCIPALS_FILE="\$PRINCIPALS"/);
+  assert.match(installer, /chown root:"\$PRINCIPALS_GROUP" "\$PRINCIPALS"/);
+  assert.match(installer, /chmod 0640 "\$PRINCIPALS"/);
 });
