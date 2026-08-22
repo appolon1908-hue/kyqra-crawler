@@ -89,4 +89,7 @@ test('installer fixes managed paths and rejects arbitrary arguments', () => {
   assert.match(installer, /RELEASE_SYMLINK_DENIED/);
   assert.match(installer, /RELEASE_SIGNATURE_INVALID/);
   assert.match(installer, /automatic-rollback/);
+  assert.match(installer, /verify_principals/);
+  assert.match(installer, /PRINCIPAL_REGISTRY_MODE_INVALID/);
+  assert.match(installer, /KYQRA_SERVICE_PRINCIPALS_FILE="\$PRINCIPALS"/);
 });

@@ -12,6 +12,7 @@ RELEASE_ROOT='/opt/codestra/releases/kyqra'
 RELEASE="$RELEASE_ROOT/$EXPECTED_COMMIT"
 APP='/opt/kyqra-crawler'
 MTLS='/etc/codestra/mtls/kyqra'
+PRINCIPALS='/etc/codestra/kyqra/service-principals.json'
 PUBLIC_NGINX='/etc/nginx/sites-available/kyqra-crawler.conf'
 ENABLED_NGINX='/etc/nginx/sites-enabled/kyqra-crawler.conf'
 PRIVATE_NGINX='/etc/nginx/conf.d/codestra-kyqra-mtls.conf'
@@ -88,8 +89,23 @@ verify_certificates() {
   [[ "$cert_pub" == "$key_pub" ]] || die SERVER_KEY_MISMATCH
 }
 
+verify_principals() {
+  safe_regular "$PRINCIPALS"
+  [[ "$(stat -c '%a' "$PRINCIPALS")" == 600 ]] || die PRINCIPAL_REGISTRY_MODE_INVALID
+  jq -e '
+    (.principals | type == "array") and
+    (.principals | length > 0) and
+    all(.principals[];
+      (.key_sha256 | test("^[0-9a-f]{64}$")) and
+      (.tenant_id | type == "string" and length > 0) and
+      (.client_id | type == "string" and length > 0) and
+      (.enabled | type == "boolean")
+    )
+  ' "$PRINCIPALS" >/dev/null || die PRINCIPAL_REGISTRY_INVALID
+}
+
 validate_configs() {
-  KYQRA_IMAGE="$EXPECTED_IMAGE" KYQRA_ENV_FILE="$APP/.env" POSTGRES_PASSWORD="$(sed -n 's/^POSTGRES_PASSWORD=//p' "$APP/.env")" \
+  KYQRA_IMAGE="$EXPECTED_IMAGE" KYQRA_ENV_FILE="$APP/.env" KYQRA_SERVICE_PRINCIPALS_FILE="$PRINCIPALS" POSTGRES_PASSWORD="$(sed -n 's/^POSTGRES_PASSWORD=//p' "$APP/.env")" \
     docker compose --project-directory "$APP" -f "$RELEASE/docker-compose.yml" config --quiet || die COMPOSE_INVALID
   /usr/sbin/nginx -t -c "$RELEASE/nginx-test.conf" -p /etc/nginx/ >/dev/null 2>&1 || die NGINX_STAGING_INVALID
   grep -Fq '127.0.0.1:3100:3000' "$RELEASE/docker-compose.yml" || die LOOPBACK_BINDING_MISSING
@@ -154,7 +170,7 @@ do_rollback() {
   /usr/sbin/nginx -t >/dev/null 2>&1; systemctl reload nginx
   /usr/sbin/ufw --force delete allow in on enp5s0.4001 from 10.40.0.1 to 10.40.0.4 port 18444 proto tcp >/dev/null 2>&1 || true
   /usr/sbin/ufw allow in on enp5s0.4001 from 10.40.0.1 to 10.40.0.4 port 3100 proto tcp comment 'Middleware to Kyqra private API' >/dev/null
-  (cd "$APP" && docker compose -p kyqra-crawler -f docker-compose.yml up -d --no-deps --force-recreate api >/dev/null)
+  (cd "$APP" && KYQRA_SERVICE_PRINCIPALS_FILE="$PRINCIPALS" docker compose -p kyqra-crawler -f docker-compose.yml up -d --no-deps --force-recreate api >/dev/null)
   curl -fsS --max-time 10 http://127.0.0.1:3100/health >/dev/null
   record PASS
   printf 'ROLLBACK=PASS\n'
@@ -167,13 +183,13 @@ case "$op" in
     record PASS
     ;;
   validate)
-    verify_release; verify_certificates; validate_configs; record PASS; printf 'VALIDATE=PASS\n'
+    verify_release; verify_certificates; verify_principals; validate_configs; record PASS; printf 'VALIDATE=PASS\n'
     ;;
   preflight)
-    verify_release; verify_certificates; validate_configs; preflight_runtime; record PASS; printf 'PREFLIGHT=PASS\n'
+    verify_release; verify_certificates; verify_principals; validate_configs; preflight_runtime; record PASS; printf 'PREFLIGHT=PASS\n'
     ;;
   install)
-    verify_release; verify_certificates; validate_configs; preflight_runtime; create_backup
+    verify_release; verify_certificates; verify_principals; validate_configs; preflight_runtime; create_backup
     trap 'rc=$?; trap - ERR; op=automatic-rollback; do_rollback || true; exit $rc' ERR
     install -m 0644 "$RELEASE/docker-compose.yml" "$APP/docker-compose.yml"
     rm -rf "$APP/src.install-staging"; install -d -o root -g root -m 0755 "$APP/src.install-staging"
@@ -184,7 +200,7 @@ case "$op" in
     install -m 0644 "$RELEASE/codestra-kyqra-mtls.conf" "$PRIVATE_NGINX"
     /usr/sbin/nginx -t >/dev/null 2>&1
     /usr/sbin/ufw allow in on enp5s0.4001 from 10.40.0.1 to 10.40.0.4 port 18444 proto tcp comment 'Middleware to Kyqra mTLS API' >/dev/null
-    (cd "$APP" && KYQRA_IMAGE="$EXPECTED_IMAGE" docker compose -p kyqra-crawler -f docker-compose.yml up -d --no-deps --force-recreate api >/dev/null)
+    (cd "$APP" && KYQRA_IMAGE="$EXPECTED_IMAGE" KYQRA_SERVICE_PRINCIPALS_FILE="$PRINCIPALS" docker compose -p kyqra-crawler -f docker-compose.yml up -d --no-deps --force-recreate api >/dev/null)
     systemctl reload nginx
     for _ in $(seq 1 30); do curl -fsS --max-time 3 http://127.0.0.1:3100/readyz >/dev/null 2>&1 && break; sleep 1; done
     /usr/sbin/ufw --force delete allow in on enp5s0.4001 from 10.40.0.1 to 10.40.0.4 port 3100 proto tcp >/dev/null
@@ -192,7 +208,7 @@ case "$op" in
     trap - ERR; record PASS; printf 'INSTALL=PASS\n'
     ;;
   verify)
-    verify_release; verify_certificates; runtime_verify; record PASS; printf 'VERIFY=PASS\n'
+    verify_release; verify_certificates; verify_principals; runtime_verify; record PASS; printf 'VERIFY=PASS\n'
     ;;
   rollback) do_rollback ;;
   cleanup-staging)
