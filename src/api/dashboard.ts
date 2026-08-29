@@ -5,5 +5,5 @@ const readStatic = (filename: string): string =>
 
 export const dashboardHtml = (): string =>
   readStatic('dashboard.html')
-    .replace('{{STYLE}}', readStatic('dashboard.css'))
-    .replace('{{SCRIPT}}', readStatic('dashboard.js'));
+    .replace('__KYQRA_STYLE__', readStatic('dashboard.css'))
+    .replace('__KYQRA_SCRIPT__', readStatic('dashboard.js'));

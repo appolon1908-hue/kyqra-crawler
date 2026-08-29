@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { jobSpecSchema } from '../../src/config/schema.js';
+import { dashboardHtml } from '../../src/api/dashboard.js';
 import {
   browserConcurrency,
   httpConcurrency,
@@ -17,6 +18,13 @@ import { extractGenericData } from '../../src/extract/generic.js';
 import { canonicalizeUrl, urlHash } from '../../src/frontier/canonicalize.js';
 
 describe('crawler core behavior', () => {
+  it('assembles dashboard assets into the served document', () => {
+    const dashboard = dashboardHtml();
+    expect(dashboard).toContain('async function go()');
+    expect(dashboard).toContain('background: #101827');
+    expect(dashboard).not.toContain('__KYQRA_');
+  });
+
   it('canonicalizes tracking URLs and hashes the canonical form', () => {
     const canonical = canonicalizeUrl('HTTPS://EXAMPLE.COM/path/?utm_source=test&b=2#fragment');
     expect(canonical).toBe('https://example.com/path?b=2');

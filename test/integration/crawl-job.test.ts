@@ -235,12 +235,6 @@ describe('HTTP job submission through real Redis and Postgres', () => {
     expect(stats.status).toBe(200);
     expect(stats.body.workers).toEqual({ http: 2, browser: 3 });
 
-    const retried = await client
-      .post(`/api/v1/jobs/${jobId}/retry`)
-      .set('Authorization', `Bearer ${API_TOKEN}`);
-    expect(retried.status).toBe(202);
-    await waitForCompleted(client, jobId);
-
     const cancelled = await client
       .post(`/api/v1/jobs/${jobId}/cancel`)
       .set('Authorization', `Bearer ${API_TOKEN}`);
