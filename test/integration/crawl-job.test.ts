@@ -97,7 +97,7 @@ describe('HTTP job submission through real Redis and Postgres', () => {
 
   afterAll(async () => {
     await app?.close();
-    await crawlWorker?.close();
+    await crawlWorker?.close(true);
     if (runtime) await closeRuntime(runtime);
     await fixture?.close();
     await Promise.all([postgres?.stop(), redis?.stop()]);
