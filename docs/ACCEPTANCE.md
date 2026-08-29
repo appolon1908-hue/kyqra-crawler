@@ -5,7 +5,7 @@ milestone appends one row after its exit criteria pass. Links must point to the
 specific GitHub Actions run that exercised the recorded commit.
 
 | Milestone | Date (UTC) | Commit SHA | CI run | Claims proved | Explicitly not claimed |
-| --- | --- | --- | --- | --- | --- |
+| --------- | ---------- | ---------- | ------ | ------------- | ---------------------- |
 
 ## Entry requirements
 

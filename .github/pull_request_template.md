@@ -1,6 +1,6 @@
 ## Milestone
 
-- Milestone: M__
+- Milestone: M\_\_
 - Mission issue(s):
 
 ## Summary

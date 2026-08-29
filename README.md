@@ -37,12 +37,12 @@ The API currently accepts several values that are retained for compatibility
 but are **not implemented**. Do not rely on them until a later milestone is
 recorded as proven in `docs/ACCEPTANCE.md`.
 
-| Field or value | Current behavior |
-| --- | --- |
-| `extract` | **NOT IMPLEMENTED** — accepted but ignored. |
-| `mode=list` | **NOT IMPLEMENTED** — currently behaves like `domain`. |
-| `mode=discovery` | **NOT IMPLEMENTED** — currently behaves like `domain`; no search or sitemap discovery occurs. |
-| `browser=auto` | **NOT IMPLEMENTED** — currently selects the HTTP crawler and does not auto-escalate to Playwright. |
+| Field or value   | Current behavior                                                                                   |
+| ---------------- | -------------------------------------------------------------------------------------------------- |
+| `extract`        | **NOT IMPLEMENTED** — accepted but ignored.                                                        |
+| `mode=list`      | **NOT IMPLEMENTED** — currently behaves like `domain`.                                             |
+| `mode=discovery` | **NOT IMPLEMENTED** — currently behaves like `domain`; no search or sitemap discovery occurs.      |
+| `browser=auto`   | **NOT IMPLEMENTED** — currently selects the HTTP crawler and does not auto-escalate to Playwright. |
 
 Implemented paths are `mode=single`, `mode=domain`, `browser=http`, and
 `browser=playwright`. Request Playwright explicitly for rendered pages.
