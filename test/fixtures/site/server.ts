@@ -16,7 +16,7 @@ export const buildFixtureSite = (): Express => {
       <title>Static Fixture</title>
       <meta name="description" content="A deterministic fixture page">
       <meta property="og:site_name" content="Fixture Industries">
-      </head><body><h1>Static Fixture</h1><p>hello@fixture.test</p>
+      </head><body><h1>Static Fixture</h1><p>Contact: hello@fixture.test</p>
       <address>100 Test Avenue</address></body></html>`);
   });
   app.get('/js-rendered', (_request, response) => {
