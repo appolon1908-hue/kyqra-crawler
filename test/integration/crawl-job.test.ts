@@ -90,6 +90,7 @@ describe('HTTP job submission through real Redis and Postgres', () => {
     process.env.HTTP_CONCURRENCY = '2';
     runtime = createRuntime();
     app = await buildApi(runtime);
+    await app.ready();
     crawlWorker = createCrawlWorker(runtime);
     await crawlWorker.waitUntilReady();
     client = request(app.server);
