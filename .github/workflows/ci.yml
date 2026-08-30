@@ -62,6 +62,15 @@ jobs:
           path: coverage/coverage-summary.json
           retention-days: 7
 
+  migration-roundtrip:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with: { node-version: '22', cache: npm }
+      - run: npm ci --ignore-scripts
+      - run: npm run test:migrations
+
   security-tests:
     runs-on: ubuntu-latest
     steps:
@@ -170,6 +179,7 @@ jobs:
           docker run -d --name kyqra-ci-redis --network kyqra-fixture redis:7.4-alpine@sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2
           docker run -d --name kyqra-ci-postgres --network kyqra-fixture -e POSTGRES_PASSWORD=fixture-only -e POSTGRES_USER=crawler -e POSTGRES_DB=crawler postgres:17-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73
           for i in $(seq 1 60); do docker exec kyqra-ci-postgres pg_isready -U crawler && break; sleep 1; done
+          docker run --rm --network kyqra-fixture -e DATABASE_URL=postgresql://crawler:fixture-only@kyqra-ci-postgres:5432/crawler kyqra-ci:${{ github.sha }} node dist/storage/postgres/migrate.js up
           docker run -d --name kyqra-ci-api --network kyqra-fixture -p 127.0.0.1:3100:3000 -e ROLE=api -e REDIS_HOST=kyqra-ci-redis -e DATABASE_URL=postgresql://crawler:fixture-only@kyqra-ci-postgres:5432/crawler -e API_KEY=fixture-only kyqra-ci:${{ github.sha }}
           for i in $(seq 1 60); do curl -fsS http://127.0.0.1:3100/readyz && break; sleep 1; done
           test "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:3100/healthz)" = 200

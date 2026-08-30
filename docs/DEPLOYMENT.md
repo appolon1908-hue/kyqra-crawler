@@ -16,3 +16,10 @@ Nginx and UFW as one transaction. Any failed verification invokes rollback.
 Only the Kyqra API container and Nginx configuration are reloaded.
 The exact image is loaded from the signed, checksummed release bundle, so the
 Provider requires no registry credential and performs no floating-tag pull.
+
+The Compose transaction includes a one-shot `migrate` service. It waits for
+PostgreSQL, acquires the `node-pg-migrate` advisory lock, applies the checked-in
+SQL migrations, and must exit successfully before the API can start. API and
+worker startup contain no DDL. Back up PostgreSQL before deployment; a rollback
+that crosses a schema migration must stop application services and run the
+explicit down migration before restoring the prior image.

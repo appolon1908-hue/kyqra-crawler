@@ -18,12 +18,18 @@ docker compose pull && docker compose build --pull && docker compose up -d
 
 Secrets are in mode-0600 `.env` and must never be committed. Rotate API_KEY and WEBHOOK_SECRET when distributing access.
 
+Compose runs the one-shot `migrate` service after PostgreSQL is healthy and
+requires it to complete before the API starts. Application processes never
+create or alter tables. For a controlled manual rollback, stop application
+services, take a backup, and run `node dist/storage/postgres/migrate.js down`
+inside the immutable application image. Migration rollback is destructive and
+must not run against a live service.
+
 ## API
 
 Base URL: `https://crawler.kyqra.com`. The following is an inventory of routes
 registered by v1.1 source. It is not an end-to-end acceptance claim; behavioral
-coverage is scheduled for M1 and proven capabilities are recorded in
-`docs/ACCEPTANCE.md`.
+behavioral evidence and capability limits are recorded in `docs/ACCEPTANCE.md`.
 
 ### Public routes
 

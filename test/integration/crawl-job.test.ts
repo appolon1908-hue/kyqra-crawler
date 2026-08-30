@@ -13,6 +13,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { buildApi } from '../../src/api/app.js';
 import { closeRuntime, createRuntime } from '../../src/runtime.js';
 import type { JobSpec } from '../../src/config/schema.js';
+import { migrateDatabase } from '../../src/storage/postgres/migrate.js';
 import type { Runtime } from '../../src/types.js';
 import { createCrawlWorker } from '../../src/workers/crawl.js';
 import { startFixtureSite, type FixtureSite } from '../fixtures/site/server.js';
@@ -88,6 +89,7 @@ describe('HTTP job submission through real Redis and Postgres', () => {
     process.env.KYQRA_SERVICE_PRINCIPALS_FILE = principalPath;
     process.env.MIDDLEWARE_BASE_URL = '';
     process.env.HTTP_CONCURRENCY = '2';
+    await migrateDatabase(postgres.getConnectionUri(), 'up');
     runtime = createRuntime();
     app = await buildApi(runtime);
     await app.ready();
