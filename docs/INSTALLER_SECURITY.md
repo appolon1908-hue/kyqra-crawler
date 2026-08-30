@@ -12,6 +12,12 @@ chain/SAN/key/serial, Compose and Nginx configuration, backup capacity and
 unrelated provider health. Installation takes a database and configuration
 backup first and automatically rolls back on error.
 
+For releases with schema changes, validation rejects a Compose model that does
+not gate API startup on the one-shot migrator. Installation runs that migrator
+from the pinned image before recreating the API. Rollback stops the fixed Kyqra
+application service set, recreates the crawler database from the checksummed
+pre-install dump, and then restarts the prior API and workers.
+
 The sudo policy grants `kyqra-deploy` only seven exact command lines. It does
 not grant a shell, editor, copy primitive, Docker wildcard, systemctl wildcard,
 Nginx wildcard, UFW wildcard, or general root access.

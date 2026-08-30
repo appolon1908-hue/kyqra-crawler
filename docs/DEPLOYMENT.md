@@ -23,3 +23,10 @@ SQL migrations, and must exit successfully before the API can start. API and
 worker startup contain no DDL. Back up PostgreSQL before deployment; a rollback
 that crosses a schema migration must stop application services and run the
 explicit down migration before restoring the prior image.
+
+The fixed-path privileged installer enforces that migration dependency in the
+rendered Compose model and explicitly runs the pinned image's one-shot migrator
+before recreating the API. Automatic rollback stops all Kyqra application
+containers, restores the pre-install PostgreSQL dump, and only then recreates
+the prior API and workers, so a failed schema cutover cannot leave old code on
+the new schema.

@@ -114,8 +114,13 @@ prepare_principals() {
 }
 
 validate_configs() {
-  KYQRA_IMAGE="$EXPECTED_IMAGE" KYQRA_ENV_FILE="$APP/.env" KYQRA_SERVICE_PRINCIPALS_FILE="$PRINCIPALS" KYQRA_SECRETS_GID="$(getent group "$PRINCIPALS_GROUP" | cut -d: -f3)" POSTGRES_PASSWORD="$(sed -n 's/^POSTGRES_PASSWORD=//p' "$APP/.env")" \
-    docker compose --project-directory "$APP" -f "$RELEASE/docker-compose.yml" config --quiet || die COMPOSE_INVALID
+  local compose_json
+  compose_json=$(KYQRA_IMAGE="$EXPECTED_IMAGE" KYQRA_ENV_FILE="$APP/.env" KYQRA_SERVICE_PRINCIPALS_FILE="$PRINCIPALS" KYQRA_SECRETS_GID="$(getent group "$PRINCIPALS_GROUP" | cut -d: -f3)" POSTGRES_PASSWORD="$(sed -n 's/^POSTGRES_PASSWORD=//p' "$APP/.env")" \
+    docker compose --project-directory "$APP" -f "$RELEASE/docker-compose.yml" config --format json) || die COMPOSE_INVALID
+  jq -e '
+    (.services.migrate.command == ["node", "dist/storage/postgres/migrate.js", "up"]) and
+    (.services.api.depends_on.migrate.condition == "service_completed_successfully")
+  ' <<<"$compose_json" >/dev/null || die MIGRATION_GATE_MISSING
   /usr/sbin/nginx -t -c "$RELEASE/nginx-test.conf" -p /etc/nginx/ >/dev/null 2>&1 || die NGINX_STAGING_INVALID
   grep -Fq '127.0.0.1:3100:3000' "$RELEASE/docker-compose.yml" || die LOOPBACK_BINDING_MISSING
   ! grep -Eq '(0\.0\.0\.0|10\.40\.0\.4):3100:3000' "$RELEASE/docker-compose.yml" || die RAW_BACKEND_EXPOSED
@@ -170,16 +175,20 @@ do_rollback() {
   backup=$(<"$CURRENT_BACKUP")
   [[ "$backup" == "$BACKUPS"/* && -d "$backup" && ! -L "$backup" ]] || die ROLLBACK_PATH_INVALID
   (cd "$backup" && sha256sum -c SHA256SUMS >/dev/null) || die BACKUP_CHECKSUM_INVALID
+  (cd "$APP" && KYQRA_IMAGE="$EXPECTED_IMAGE" KYQRA_SERVICE_PRINCIPALS_FILE="$PRINCIPALS" KYQRA_SECRETS_GID="$(getent group "$PRINCIPALS_GROUP" | cut -d: -f3)" docker compose -p kyqra-crawler -f docker-compose.yml stop api http-worker browser-worker callback-worker >/dev/null)
   install -m 0644 "$backup/docker-compose.yml" "$APP/docker-compose.yml"
   rm -rf "$APP/src.rollback-staging"; install -d -o root -g root -m 0755 "$APP/src.rollback-staging"
   tar -C "$APP/src.rollback-staging" --strip-components=1 -xzf "$backup/src.tgz"
   rm -rf "$APP/src"; mv "$APP/src.rollback-staging" "$APP/src"
   install -m 0644 "$backup/kyqra-crawler.conf" "$PUBLIC_NGINX"; install -m 0644 "$backup/kyqra-crawler.conf" "$ENABLED_NGINX"
   if [[ -f "$backup/private-nginx.absent" ]]; then rm -f "$PRIVATE_NGINX"; else install -m 0644 "$backup/codestra-kyqra-mtls.conf" "$PRIVATE_NGINX"; fi
+  docker exec kyqra-crawler-postgres-1 dropdb --if-exists --force -U crawler crawler
+  docker exec kyqra-crawler-postgres-1 createdb -U crawler -O crawler crawler
+  docker exec -i kyqra-crawler-postgres-1 pg_restore --exit-on-error --single-transaction --no-owner -U crawler -d crawler <"$backup/crawler.dump"
   /usr/sbin/nginx -t >/dev/null 2>&1; systemctl reload nginx
   /usr/sbin/ufw --force delete allow in on enp5s0.4001 from 10.40.0.1 to 10.40.0.4 port 18444 proto tcp >/dev/null 2>&1 || true
   /usr/sbin/ufw allow in on enp5s0.4001 from 10.40.0.1 to 10.40.0.4 port 3100 proto tcp comment 'Middleware to Kyqra private API' >/dev/null
-  (cd "$APP" && KYQRA_SERVICE_PRINCIPALS_FILE="$PRINCIPALS" KYQRA_SECRETS_GID="$(getent group "$PRINCIPALS_GROUP" | cut -d: -f3)" docker compose -p kyqra-crawler -f docker-compose.yml up -d --no-deps --force-recreate api >/dev/null)
+  (cd "$APP" && KYQRA_SERVICE_PRINCIPALS_FILE="$PRINCIPALS" KYQRA_SECRETS_GID="$(getent group "$PRINCIPALS_GROUP" | cut -d: -f3)" docker compose -p kyqra-crawler -f docker-compose.yml up -d --no-deps --force-recreate api http-worker browser-worker callback-worker >/dev/null)
   curl -fsS --max-time 10 http://127.0.0.1:3100/health >/dev/null
   record PASS
   printf 'ROLLBACK=PASS\n'
@@ -210,6 +219,7 @@ case "$op" in
     install -m 0644 "$RELEASE/codestra-kyqra-mtls.conf" "$PRIVATE_NGINX"
     /usr/sbin/nginx -t >/dev/null 2>&1
     /usr/sbin/ufw allow in on enp5s0.4001 from 10.40.0.1 to 10.40.0.4 port 18444 proto tcp comment 'Middleware to Kyqra mTLS API' >/dev/null
+    (cd "$APP" && KYQRA_IMAGE="$EXPECTED_IMAGE" KYQRA_SERVICE_PRINCIPALS_FILE="$PRINCIPALS" KYQRA_SECRETS_GID="$(getent group "$PRINCIPALS_GROUP" | cut -d: -f3)" docker compose -p kyqra-crawler -f docker-compose.yml run --rm --no-deps migrate >/dev/null)
     (cd "$APP" && KYQRA_IMAGE="$EXPECTED_IMAGE" KYQRA_SERVICE_PRINCIPALS_FILE="$PRINCIPALS" KYQRA_SECRETS_GID="$(getent group "$PRINCIPALS_GROUP" | cut -d: -f3)" docker compose -p kyqra-crawler -f docker-compose.yml up -d --no-deps --force-recreate api >/dev/null)
     systemctl reload nginx
     for _ in $(seq 1 30); do curl -fsS --max-time 3 http://127.0.0.1:3100/readyz >/dev/null 2>&1 && break; sleep 1; done
