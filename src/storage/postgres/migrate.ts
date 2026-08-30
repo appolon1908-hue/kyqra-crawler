@@ -2,6 +2,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { runner } from 'node-pg-migrate';
+import pg from 'pg';
 
 export type MigrationDirection = 'up' | 'down';
 
@@ -10,11 +11,30 @@ const migrationDirectory = path.resolve(
   '../../../migrations',
 );
 
+const waitForDatabase = async (databaseUrl: string, attempts = 30): Promise<void> => {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    const client = new pg.Client({ connectionString: databaseUrl });
+    try {
+      await client.connect();
+      await client.query('select 1');
+      return;
+    } catch (error: unknown) {
+      lastError = error;
+    } finally {
+      await client.end().catch(() => undefined);
+    }
+    if (attempt < attempts) await new Promise((resolve) => setTimeout(resolve, 1_000));
+  }
+  throw lastError;
+};
+
 export const migrateDatabase = async (
   databaseUrl: string,
   direction: MigrationDirection,
   count = direction === 'up' ? Number.POSITIVE_INFINITY : 1,
 ): Promise<void> => {
+  await waitForDatabase(databaseUrl);
   await runner({
     databaseUrl,
     direction,
