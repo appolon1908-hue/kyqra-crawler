@@ -58,7 +58,7 @@ jobs:
       - run: npm run test:coverage
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: m1-coverage-summary
+          name: coverage-summary
           path: coverage/coverage-summary.json
           retention-days: 7
 
