@@ -2,6 +2,7 @@ FROM mcr.microsoft.com/playwright:v1.62.1-noble@sha256:dcc5531e97840b9b5e794f281
 WORKDIR /app
 COPY package*.json tsconfig.json ./
 RUN npm ci && npm cache clean --force
+COPY scripts/copy-static.mjs ./scripts/copy-static.mjs
 COPY src ./src
 RUN npm run build && npm prune --omit=dev --omit=optional
 
