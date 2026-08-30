@@ -25,8 +25,8 @@ that crosses a schema migration must stop application services and run the
 explicit down migration before restoring the prior image.
 
 The fixed-path privileged installer enforces that migration dependency in the
-rendered Compose model and explicitly runs the pinned image's one-shot migrator
-before recreating the API. Automatic rollback stops all Kyqra application
-containers, restores the pre-install PostgreSQL dump, and only then recreates
-the prior API and workers, so a failed schema cutover cannot leave old code on
-the new schema.
+rendered Compose model, stops the fixed Kyqra application service set, and runs
+the pinned image's one-shot migrator before recreating the API and every worker.
+Automatic rollback keeps those containers stopped, restores the pre-install
+PostgreSQL dump, and only then recreates the prior API and workers, so a schema
+cutover cannot mix old code with a new schema.

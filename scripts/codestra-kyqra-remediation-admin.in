@@ -219,8 +219,9 @@ case "$op" in
     install -m 0644 "$RELEASE/codestra-kyqra-mtls.conf" "$PRIVATE_NGINX"
     /usr/sbin/nginx -t >/dev/null 2>&1
     /usr/sbin/ufw allow in on enp5s0.4001 from 10.40.0.1 to 10.40.0.4 port 18444 proto tcp comment 'Middleware to Kyqra mTLS API' >/dev/null
+    (cd "$APP" && KYQRA_IMAGE="$EXPECTED_IMAGE" KYQRA_SERVICE_PRINCIPALS_FILE="$PRINCIPALS" KYQRA_SECRETS_GID="$(getent group "$PRINCIPALS_GROUP" | cut -d: -f3)" docker compose -p kyqra-crawler -f docker-compose.yml stop api http-worker browser-worker callback-worker >/dev/null)
     (cd "$APP" && KYQRA_IMAGE="$EXPECTED_IMAGE" KYQRA_SERVICE_PRINCIPALS_FILE="$PRINCIPALS" KYQRA_SECRETS_GID="$(getent group "$PRINCIPALS_GROUP" | cut -d: -f3)" docker compose -p kyqra-crawler -f docker-compose.yml run --rm --no-deps migrate >/dev/null)
-    (cd "$APP" && KYQRA_IMAGE="$EXPECTED_IMAGE" KYQRA_SERVICE_PRINCIPALS_FILE="$PRINCIPALS" KYQRA_SECRETS_GID="$(getent group "$PRINCIPALS_GROUP" | cut -d: -f3)" docker compose -p kyqra-crawler -f docker-compose.yml up -d --no-deps --force-recreate api >/dev/null)
+    (cd "$APP" && KYQRA_IMAGE="$EXPECTED_IMAGE" KYQRA_SERVICE_PRINCIPALS_FILE="$PRINCIPALS" KYQRA_SECRETS_GID="$(getent group "$PRINCIPALS_GROUP" | cut -d: -f3)" docker compose -p kyqra-crawler -f docker-compose.yml up -d --no-deps --force-recreate api http-worker browser-worker callback-worker >/dev/null)
     systemctl reload nginx
     for _ in $(seq 1 30); do curl -fsS --max-time 3 http://127.0.0.1:3100/readyz >/dev/null 2>&1 && break; sleep 1; done
     /usr/sbin/ufw --force delete allow in on enp5s0.4001 from 10.40.0.1 to 10.40.0.4 port 3100 proto tcp >/dev/null
