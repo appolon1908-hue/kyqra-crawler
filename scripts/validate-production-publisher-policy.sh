@@ -28,7 +28,7 @@ promote_line="$(grep -n 'Promote only the fully certified digest to the immutabl
 grep -Fq -- '--severity HIGH,CRITICAL' "$workflow"
 grep -Fq 'test "$existing" = "$CANDIDATE_DIGEST"' "$workflow"
 test "$(grep -Fc 'if existing=' "$workflow")" = 2
-grep -Fq "if: steps.final-tag.outputs.exists != 'true'" "$workflow"
+grep -Fq "if: steps.final_tag.outputs.exists != 'true'" "$workflow"
 grep -Fq "echo 'exists=true' >> \"\$GITHUB_OUTPUT\"" "$workflow"
 grep -Fq 'imagetools create --prefer-index=false' "$workflow"
 grep -Fq 'cosign sign --yes "$exact_image"' "$workflow"

@@ -132,7 +132,7 @@ jobs:
              .buildDefinition.externalParameters.registryDigest == $digest' provenance.json
 
       - name: Reject an immutable source-tag collision before signing
-        id: final-tag
+        id: final_tag
         env:
           CANDIDATE_DIGEST: ${{ steps.build.outputs.digest }}
         run: |
@@ -149,7 +149,7 @@ jobs:
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
 
       - name: Sign and attest the passing immutable digest
-        if: steps.final-tag.outputs.exists != 'true'
+        if: steps.final_tag.outputs.exists != 'true'
         env:
           CANDIDATE_DIGEST: ${{ steps.build.outputs.digest }}
           IDENTITY: https://github.com/appolon1908-hue/kyqra-crawler/.github/workflows/publish-kyqra-production.yml@refs/heads/main
