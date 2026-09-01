@@ -4,3 +4,4 @@ coverage
 release
 evidence
 package-lock.json
+migrations/*.sql

@@ -35,14 +35,15 @@ export interface JobResultRow {
   provenance: Record<string, string>;
 }
 
-export const initializeSchema = async (db: Pool): Promise<void> => {
-  await db.query(
-    `CREATE TABLE IF NOT EXISTS jobs(id uuid primary key,status text,payload jsonb,progress jsonb default '{}',error text,created_at timestamptz default now(),updated_at timestamptz default now());CREATE TABLE IF NOT EXISTS results(id bigserial primary key,job_id uuid references jobs(id) on delete cascade,url text,url_hash text,data jsonb,provenance jsonb,created_at timestamptz default now(),unique(job_id,url_hash));CREATE TABLE IF NOT EXISTS job_requests(job_id uuid primary key references jobs(id) on delete cascade,idempotency_key text not null,request_hash text not null,correlation_id text not null,tenant_id text not null);ALTER TABLE job_requests ADD COLUMN IF NOT EXISTS tenant_id text;ALTER TABLE job_requests ALTER COLUMN tenant_id SET NOT NULL;ALTER TABLE job_requests DROP CONSTRAINT IF EXISTS job_requests_idempotency_key_key;CREATE UNIQUE INDEX IF NOT EXISTS job_requests_tenant_idempotency ON job_requests(tenant_id,idempotency_key);CREATE INDEX IF NOT EXISTS results_job ON results(job_id)`,
-  );
+export const checkPostgresReady = async (db: Pool): Promise<void> => {
+  await db.query('select tenant_id,spec,budget from jobs limit 0');
 };
 
 export const markJobRunning = async (db: Pool, jobId: string): Promise<void> => {
-  await db.query("update jobs set status='running',updated_at=now() where id=$1", [jobId]);
+  await db.query(
+    "update jobs set status='running',started_at=coalesce(started_at,now()),updated_at=now() where id=$1",
+    [jobId],
+  );
 };
 
 export const insertResult = async (
@@ -65,10 +66,10 @@ export const markJobCompleted = async (
   jobId: string,
   progress: { processed: number; records: number; failed: number },
 ): Promise<void> => {
-  await db.query("update jobs set status='completed',progress=$2,updated_at=now() where id=$1", [
-    jobId,
-    progress,
-  ]);
+  await db.query(
+    "update jobs set status='completed',progress=$2,finished_at=now(),updated_at=now() where id=$1",
+    [jobId, progress],
+  );
 };
 
 export const getJobMetadata = async (db: Pool, jobId: string): Promise<JobMetadata | null> => {
@@ -91,7 +92,10 @@ export const listResultsForCallbacks = async (
 };
 
 export const markJobFailed = async (db: Pool, jobId: string, error: string): Promise<void> => {
-  await db.query("update jobs set status='failed',error=$2 where id=$1", [jobId, error]);
+  await db.query("update jobs set status='failed',error=$2,finished_at=now() where id=$1", [
+    jobId,
+    error,
+  ]);
 };
 
 export const findIdempotentJob = async (
@@ -117,8 +121,9 @@ const insertJobTransaction = async (
 ): Promise<void> => {
   await client.query('begin');
   try {
-    await client.query("insert into jobs(id,status,payload) values($1,'queued',$2)", [
+    await client.query("insert into jobs(id,tenant_id,status,spec) values($1,$2,'queued',$3)", [
       jobId,
+      tenantId,
       payload,
     ]);
     await client.query(
@@ -209,14 +214,15 @@ export const getJobPayload = async (
   tenantId: string,
 ): Promise<JobSpec | null> => {
   const result = await db.query<{ payload: JobSpec }>(
-    'select j.payload from jobs j join job_requests m on m.job_id=j.id where j.id=$1 and m.tenant_id=$2',
+    'select j.spec as payload from jobs j join job_requests m on m.job_id=j.id where j.id=$1 and m.tenant_id=$2',
     [jobId, tenantId],
   );
   return result.rows[0]?.payload ?? null;
 };
 
 export const resetJobQueued = async (db: Pool, jobId: string): Promise<void> => {
-  await db.query("update jobs set status='queued',error=null,updated_at=now() where id=$1", [
-    jobId,
-  ]);
+  await db.query(
+    "update jobs set status='queued',error=null,started_at=null,finished_at=null,updated_at=now() where id=$1",
+    [jobId],
+  );
 };

@@ -7,12 +7,12 @@ import { jobSpecSchema } from '../config/schema.js';
 import { isCallbackAllowed } from '../delivery/security.js';
 import {
   cancelJob,
+  checkPostgresReady,
   createJob,
   findIdempotentJob,
   getJobPayload,
   getJobResults,
   getJobStatus,
-  initializeSchema,
   ownsJob,
   resetJobQueued,
   type JobResultRow,
@@ -62,12 +62,11 @@ const notFound = (reply: FastifyReply): FastifyReply =>
   reply.code(404).send({ error: 'not_found' });
 
 export const buildApi = async (runtime: Runtime): Promise<FastifyInstance> => {
-  await initializeSchema(runtime.db);
   const app = Fastify({ bodyLimit: 2_000_000 });
   const live = async (): Promise<{ status: string }> => ({ status: 'ok' });
   const ready = async (): Promise<{ status: string; redis: string; postgres: string }> => {
     await runtime.redis.ping();
-    await runtime.db.query('select 1');
+    await checkPostgresReady(runtime.db);
     return { status: 'ok', redis: 'ok', postgres: 'ok' };
   };
 

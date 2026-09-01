@@ -9,6 +9,14 @@ x-app: &app
   restart: unless-stopped
   init: true
 services:
+  migrate:
+    <<: *app
+    command: ['node', 'dist/storage/postgres/migrate.js', 'up']
+    restart: 'no'
+    depends_on:
+      postgres: { condition: service_healthy }
+    mem_limit: 256m
+    cpus: 1
   api:
     <<: *app
     environment:
@@ -23,6 +31,7 @@ services:
     depends_on:
       redis: { condition: service_healthy }
       postgres: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
     mem_limit: 1g
     cpus: 2
     healthcheck:

@@ -6,6 +6,10 @@
   "scripts": {
     "build": "tsc && node scripts/copy-static.mjs",
     "start": "node dist/main.js",
+    "migrate": "node dist/storage/postgres/migrate.js",
+    "migrate:up": "node dist/storage/postgres/migrate.js up",
+    "migrate:down": "node dist/storage/postgres/migrate.js down",
+    "migrate:down:all": "node dist/storage/postgres/migrate.js down all",
     "lint": "eslint src/**/*.ts test/**/*.ts vitest.config.ts eslint.config.js",
     "format": "prettier --write .",
     "format-check": "prettier --check .",
@@ -13,9 +17,10 @@
     "test": "vitest run --coverage",
     "test:unit": "vitest run test/unit test/fixture-site.test.ts",
     "test:integration": "vitest run test/integration",
+    "test:migrations": "vitest run test/integration/migrations.test.ts",
     "test:security": "vitest run test/unit/core.test.ts",
     "test:policy": "./scripts/validate-public-policy.sh && ./scripts/validate-mtls-config.sh",
-    "test:release-signing": "./scripts/validate-release-signing-policy.sh",
+    "test:release-signing": "./scripts/validate-release-signing-policy.sh && ./scripts/validate-production-publisher-policy.sh",
     "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
@@ -26,6 +31,7 @@
     "cheerio": "1.2.0",
     "fastify": "5.12.1",
     "ioredis": "5.7.0",
+    "node-pg-migrate": "9.0.0",
     "pg": "8.16.3",
     "playwright": "1.62.1",
     "undici": "7.29.0",
@@ -50,6 +56,6 @@
     "vitest": "4.1.11"
   },
   "engines": {
-    "node": ">=22.0.0"
+    "node": ">=22.12.0"
   }
 }
