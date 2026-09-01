@@ -20,7 +20,7 @@
     "test:migrations": "vitest run test/integration/migrations.test.ts",
     "test:security": "vitest run test/unit/core.test.ts",
     "test:policy": "./scripts/validate-public-policy.sh && ./scripts/validate-mtls-config.sh",
-    "test:release-signing": "./scripts/validate-release-signing-policy.sh",
+    "test:release-signing": "./scripts/validate-release-signing-policy.sh && ./scripts/validate-production-publisher-policy.sh",
     "test:coverage": "vitest run --coverage"
   },
   "dependencies": {

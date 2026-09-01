@@ -148,7 +148,8 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - run: ./scripts/validate-release-signing-policy.sh
-      - run: bash -n scripts/validate-release-signing-policy.sh
+      - run: ./scripts/validate-production-publisher-policy.sh
+      - run: bash -n scripts/validate-release-signing-policy.sh scripts/validate-production-publisher-policy.sh
 
   docker-build:
     runs-on: ubuntu-latest
