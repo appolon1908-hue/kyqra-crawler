@@ -35,15 +35,23 @@ export interface JobResultRow {
   provenance: Record<string, string>;
 }
 
+export interface CallbackConfigRow {
+  id: string;
+  url: string;
+  events: string[];
+  enabled: boolean;
+  created_at: Date;
+  updated_at: Date;
+}
+
 export const checkPostgresReady = async (db: Pool): Promise<void> => {
   await db.query('select tenant_id,spec,budget from jobs limit 0');
+  await db.query('select tenant_id,event_type,status from job_events limit 0');
+  await db.query('select tenant_id,url,events from callback_configs limit 0');
 };
 
 export const markJobRunning = async (db: Pool, jobId: string): Promise<void> => {
-  await db.query(
-    "update jobs set status='running',started_at=coalesce(started_at,now()),updated_at=now() where id=$1",
-    [jobId],
-  );
+  await db.query("select set_job_status($1,'running',$2)", [jobId, null]);
 };
 
 export const insertResult = async (
@@ -66,10 +74,7 @@ export const markJobCompleted = async (
   jobId: string,
   progress: { processed: number; records: number; failed: number },
 ): Promise<void> => {
-  await db.query(
-    "update jobs set status='completed',progress=$2,finished_at=now(),updated_at=now() where id=$1",
-    [jobId, progress],
-  );
+  await db.query("select set_job_status($1,'completed',$2)", [jobId, JSON.stringify(progress)]);
 };
 
 export const getJobMetadata = async (db: Pool, jobId: string): Promise<JobMetadata | null> => {
@@ -92,10 +97,7 @@ export const listResultsForCallbacks = async (
 };
 
 export const markJobFailed = async (db: Pool, jobId: string, error: string): Promise<void> => {
-  await db.query("update jobs set status='failed',error=$2,finished_at=now() where id=$1", [
-    jobId,
-    error,
-  ]);
+  await db.query("select set_job_status($1,'failed',$2)", [jobId, error.slice(0, 2000)]);
 };
 
 export const findIdempotentJob = async (
@@ -129,6 +131,10 @@ const insertJobTransaction = async (
     await client.query(
       'insert into job_requests(job_id,idempotency_key,request_hash,correlation_id,tenant_id) values($1,$2,$3,$4,$5)',
       [jobId, idempotencyKey, requestHash, correlationId, tenantId],
+    );
+    await client.query(
+      "insert into job_events(job_id,tenant_id,event_type,status,payload) values($1,$2,'job.queued','queued',$3)",
+      [jobId, tenantId, { correlation_id: correlationId }],
     );
     await client.query('commit');
   } catch (error: unknown) {
@@ -205,6 +211,12 @@ export const cancelJob = async (db: Pool, jobId: string, tenantId: string): Prom
     "update jobs j set status='cancelled',updated_at=now() from job_requests m where j.id=$1 and m.job_id=j.id and m.tenant_id=$2 returning j.id",
     [jobId, tenantId],
   );
+  if ((result.rowCount ?? 0) > 0) {
+    await db.query(
+      "insert into job_events(job_id,tenant_id,event_type,status,payload) values($1,$2,'job.cancelled','cancelled','{}')",
+      [jobId, tenantId],
+    );
+  }
   return (result.rowCount ?? 0) > 0;
 };
 
@@ -225,4 +237,89 @@ export const resetJobQueued = async (db: Pool, jobId: string): Promise<void> => 
     "update jobs set status='queued',error=null,started_at=null,finished_at=null,updated_at=now() where id=$1",
     [jobId],
   );
+  await db.query(
+    "insert into job_events(job_id,tenant_id,event_type,status,payload) select id,tenant_id,'job.queued','queued','{}' from jobs where id=$1",
+    [jobId],
+  );
+};
+
+export const listJobs = async (
+  db: Pool,
+  tenantId: string,
+  limit: number,
+): Promise<JobStatusRow[]> => {
+  const result = await db.query<JobStatusRow>(
+    `select j.id,j.status,j.progress,j.error,j.created_at,j.updated_at,m.correlation_id
+       from jobs j join job_requests m on m.job_id=j.id
+      where m.tenant_id=$1 order by j.created_at desc limit $2`,
+    [tenantId, limit],
+  );
+  return result.rows;
+};
+
+export const getJobEvents = async (db: Pool, jobId: string, tenantId: string) => {
+  const result = await db.query(
+    `select id::text,event_type,status,payload,created_at
+       from job_events where job_id=$1 and tenant_id=$2 order by id`,
+    [jobId, tenantId],
+  );
+  return result.rows;
+};
+
+export const listCallbacks = async (db: Pool, tenantId: string): Promise<CallbackConfigRow[]> => {
+  const result = await db.query<CallbackConfigRow>(
+    'select id,url,events,enabled,created_at,updated_at from callback_configs where tenant_id=$1 order by created_at desc',
+    [tenantId],
+  );
+  return result.rows;
+};
+
+export const getCallback = async (
+  db: Pool,
+  callbackId: string,
+  tenantId: string,
+): Promise<CallbackConfigRow | null> => {
+  const result = await db.query<CallbackConfigRow>(
+    'select id,url,events,enabled,created_at,updated_at from callback_configs where id=$1 and tenant_id=$2',
+    [callbackId, tenantId],
+  );
+  return result.rows[0] ?? null;
+};
+
+export const createCallback = async (
+  db: Pool,
+  values: {
+    id: string;
+    tenantId: string;
+    url: string;
+    events: string[];
+    idempotencyKey: string;
+    requestHash: string;
+  },
+): Promise<{ row: CallbackConfigRow; duplicate: boolean }> => {
+  const prior = await db.query<CallbackConfigRow & { request_hash: string }>(
+    'select id,url,events,enabled,created_at,updated_at,request_hash from callback_configs where tenant_id=$1 and idempotency_key=$2',
+    [values.tenantId, values.idempotencyKey],
+  );
+  const existing = prior.rows[0];
+  if (existing) {
+    if (existing.request_hash !== values.requestHash) throw new Error('idempotency_conflict');
+    return { row: existing, duplicate: true };
+  }
+  const result = await db.query<CallbackConfigRow>(
+    `insert into callback_configs(id,tenant_id,url,events,idempotency_key,request_hash)
+     values($1,$2,$3,$4,$5,$6)
+     returning id,url,events,enabled,created_at,updated_at`,
+    [
+      values.id,
+      values.tenantId,
+      values.url,
+      values.events,
+      values.idempotencyKey,
+      values.requestHash,
+    ],
+  );
+  const row = result.rows[0];
+  if (!row) throw new Error('callback_insert_failed');
+  return { row, duplicate: false };
 };

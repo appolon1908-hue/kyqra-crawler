@@ -5,3 +5,4 @@ coverage/
 data/
 logs/
 backups/*.sql.gz
+/storage/

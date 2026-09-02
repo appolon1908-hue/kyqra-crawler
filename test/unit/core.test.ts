@@ -78,6 +78,8 @@ describe('crawler core behavior', () => {
   });
 
   it('parses environment concurrency and Redis settings with safe defaults', () => {
+    delete process.env.REDIS_PASSWORD_FILE;
+    delete process.env.REDIS_PASSWORD;
     process.env.REDIS_HOST = 'fixture-redis';
     process.env.REDIS_PORT = '6380';
     process.env.HTTP_CONCURRENCY = '4';
@@ -87,5 +89,14 @@ describe('crawler core behavior', () => {
     expect(httpConcurrency()).toBe(4);
     expect(browserConcurrency()).toBe(2);
     expect(jobConcurrency()).toBe(2);
+  });
+
+  it('rejects Redis credentials that cannot be represented safely in an ACL', () => {
+    delete process.env.REDIS_PASSWORD_FILE;
+    process.env.REDIS_PASSWORD = 'contains spaces and shell metacharacters!';
+    expect(() => redisConnectionOptions()).toThrow('URL-safe token');
+    process.env.REDIS_PASSWORD = 'a'.repeat(32);
+    expect(redisConnectionOptions()).toMatchObject({ password: 'a'.repeat(32) });
+    delete process.env.REDIS_PASSWORD;
   });
 });

@@ -10,6 +10,23 @@ const callbackAllowlist = (): string[] =>
     .map((host) => host.trim())
     .filter(Boolean);
 
+const metadataHostnames = new Set([
+  'metadata.google.internal',
+  'metadata.azure.internal',
+  'instance-data.ec2.internal',
+  'metadata',
+]);
+const resolvedCrawlTargets = new Map<string, string>();
+
+const configuredHosts = (name: string): string[] =>
+  (process.env[name] || '')
+    .split(',')
+    .map((host) => host.trim().toLowerCase())
+    .filter(Boolean);
+
+const hostMatches = (host: string, configured: string[]): boolean =>
+  configured.some((value) => host === value || host.endsWith(`.${value}`));
+
 export const isCallbackAllowed = (rawUrl: string): boolean => {
   const url = new URL(rawUrl);
   const protocolAllowed =
@@ -79,6 +96,47 @@ export const createPinnedCallbackAgent = async (rawUrl: string): Promise<Agent> 
       },
     },
   });
+};
+
+export const validateCrawlTarget = async (rawUrl: string): Promise<void> => {
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    throw new Error('crawl_target_invalid');
+  }
+  const host = url.hostname.replace(/\.$/, '').toLowerCase();
+  if (
+    !['http:', 'https:'].includes(url.protocol) ||
+    Boolean(url.username || url.password) ||
+    metadataHostnames.has(host) ||
+    host === 'localhost' ||
+    host.endsWith('.localhost') ||
+    host.endsWith('.local') ||
+    host.endsWith('.internal') ||
+    hostMatches(host, configuredHosts('CRAWL_HOST_DENYLIST'))
+  ) {
+    throw new Error('crawl_target_denied');
+  }
+  const allowlist = configuredHosts('CRAWL_HOST_ALLOWLIST');
+  if (allowlist.length > 0 && !hostMatches(host, allowlist)) {
+    throw new Error('crawl_target_not_allowlisted');
+  }
+  const resolved = net.isIP(host)
+    ? [{ address: host }]
+    : await dns.lookup(host, { all: true, verbatim: true });
+  if (resolved.length === 0) throw new Error('crawl_target_unresolvable');
+  const addresses = [...new Set(resolved.map(({ address }) => address))].sort();
+  if (
+    process.env.KYQRA_ALLOW_TEST_TARGETS !== 'true' &&
+    addresses.some((address) => isProhibitedAddress(address))
+  ) {
+    throw new Error('crawl_target_private_address');
+  }
+  const fingerprint = addresses.join(',');
+  const prior = resolvedCrawlTargets.get(host);
+  if (prior && prior !== fingerprint) throw new Error('crawl_target_dns_rebinding');
+  resolvedCrawlTargets.set(host, fingerprint);
 };
 
 export const callbackSignatureInput = (

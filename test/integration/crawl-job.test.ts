@@ -88,6 +88,7 @@ describe('HTTP job submission through real Redis and Postgres', () => {
     process.env.REDIS_PORT = String(redis.getPort());
     process.env.KYQRA_SERVICE_PRINCIPALS_FILE = principalPath;
     process.env.MIDDLEWARE_BASE_URL = '';
+    process.env.KYQRA_ALLOW_TEST_TARGETS = 'true';
     process.env.HTTP_CONCURRENCY = '2';
     await migrateDatabase(postgres.getConnectionUri(), 'up');
     runtime = createRuntime();

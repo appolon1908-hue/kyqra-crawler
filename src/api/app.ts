@@ -19,6 +19,7 @@ import {
 } from '../storage/postgres/repository.js';
 import type { Runtime } from '../types.js';
 import { authenticate } from './auth.js';
+import { registerCanonicalApi } from './canonical.js';
 import { dashboardHtml } from './dashboard.js';
 
 interface JobParams {
@@ -33,7 +34,16 @@ interface WebhookTestBody {
   url?: string;
 }
 
-const publicPaths = ['/', '/health', '/healthz', '/readyz', '/api/v1/health'];
+const publicPaths = [
+  '/',
+  '/health',
+  '/healthz',
+  '/readyz',
+  '/health/live',
+  '/health/ready',
+  '/api/v1/health',
+  '/openapi.json',
+];
 
 const csvEscape = (value: unknown): string => `"${String(value ?? '').replaceAll('"', '""')}"`;
 
@@ -204,6 +214,8 @@ export const buildApi = async (runtime: Runtime): Promise<FastifyInstance> => {
     });
     return { queued: true };
   });
+
+  registerCanonicalApi(app, runtime);
 
   app.get('/', async (_request, reply) => reply.type('text/html').send(dashboardHtml()));
   return app;

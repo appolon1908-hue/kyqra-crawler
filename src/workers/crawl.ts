@@ -5,7 +5,7 @@ import { PlaywrightCrawler } from '@crawlee/playwright';
 
 import { browserConcurrency, httpConcurrency, jobConcurrency } from '../config/env.js';
 import { jobSpecSchema, type JobSpec } from '../config/schema.js';
-import { isCallbackAllowed } from '../delivery/security.js';
+import { isCallbackAllowed, validateCrawlTarget } from '../delivery/security.js';
 import { extractGenericData } from '../extract/generic.js';
 import { canonicalizeUrl, urlHash } from '../frontier/canonicalize.js';
 import { log } from '../observability/logger.js';
@@ -138,6 +138,7 @@ export const processCrawlJob = async (
   const jobId = job.id;
   if (!jobId) throw new Error('job_id_required');
   const progress: CrawlProgress = { processed: 0, records: 0, failed: 0 };
+  await Promise.all(spec.startUrls.map((url) => validateCrawlTarget(url)));
   await markJobRunning(runtime.db, jobId);
   const roots = spec.startUrls.map((url) => new URL(url).hostname);
   const requestQueue = await RequestQueue.open(`job-${jobId}`);
@@ -156,6 +157,9 @@ export const processCrawlJob = async (
       progress.failed += 1;
       log('warn', 'request_failed', { jobId, url: request.url });
     },
+    preNavigationHooks: [
+      async ({ request }: { request: Request }) => validateCrawlTarget(request.url),
+    ],
   };
 
   try {
