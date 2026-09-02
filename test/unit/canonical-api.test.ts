@@ -91,6 +91,9 @@ describe('canonical production API contract', () => {
     expect(migration).toContain('CREATE TABLE job_events');
     expect(migration).toContain('CREATE TABLE command_requests');
     expect(migration).toContain('job_requests_semantic_idempotency');
+    expect(migration).toContain("caller_id='legacy'");
+    expect(migration).toContain('max(char_length(idempotency_key))');
+    expect(migration).not.toContain('LOOP');
     expect(migration).toContain('-- Down Migration');
   });
 

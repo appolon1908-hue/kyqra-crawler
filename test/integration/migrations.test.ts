@@ -113,7 +113,11 @@ describe('PostgreSQL migrations', () => {
         `insert into job_requests(
            job_id,idempotency_key,request_hash,correlation_id,tenant_id,caller_id
          ) values($1,'shared-key','rollback-hash',$2,'rollback-tenant',$3)`,
-        [jobId, `rollback-correlation-${index}`, `rollback-caller-${index}`],
+        [
+          jobId,
+          `rollback-correlation-${index}`,
+          index === 1 ? 'legacy' : `rollback-caller-${index}`,
+        ],
       );
     }
     await db.query(
@@ -144,10 +148,11 @@ describe('PostgreSQL migrations', () => {
        where job_id=any($1::uuid[]) order by job_id`,
       [rollbackDuplicateJobs],
     );
-    expect(rollbackKeys.rows[0]?.idempotency_key).toBe('shared-key');
-    expect(rollbackKeys.rows[1]?.idempotency_key).toBe(
-      `v3-rollback-duplicate:${rollbackDuplicateJobs[1]}:1`,
+    expect(rollbackKeys.rows[0]?.idempotency_key).not.toBe('shared-key');
+    expect(rollbackKeys.rows[0]?.idempotency_key.length).toBeGreaterThan(
+      `v3-rollback-duplicate:${rollbackDuplicateJobs[1]}:0`.length,
     );
+    expect(rollbackKeys.rows[1]?.idempotency_key).toBe('shared-key');
     const unaffectedKey = await db.query<{ idempotency_key: string }>(
       'select idempotency_key from job_requests where job_id=$1',
       [rollbackUnaffectedJob],

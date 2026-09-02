@@ -79,36 +79,24 @@ DROP FUNCTION set_job_status(uuid,text,text);
 ALTER TABLE jobs DROP CONSTRAINT jobs_status_allowed;
 DROP TABLE command_requests;
 DROP INDEX job_requests_semantic_idempotency;
-DO $$
-DECLARE
-  duplicate_row record;
-  candidate text;
-  suffix bigint;
-BEGIN
-  FOR duplicate_row IN
-    SELECT job_id,tenant_id
-      FROM (
-        SELECT job_id,tenant_id,row_number() OVER (
-          PARTITION BY tenant_id,idempotency_key ORDER BY job_id
-        ) AS ordinal
-        FROM job_requests
-      ) AS ranked
-     WHERE ordinal > 1
-     ORDER BY tenant_id,job_id
-  LOOP
-    suffix := 0;
-    LOOP
-      candidate := 'v3-rollback-duplicate:' || duplicate_row.job_id::text || ':' || suffix::text;
-      EXIT WHEN NOT EXISTS (
-        SELECT 1 FROM job_requests
-         WHERE tenant_id=duplicate_row.tenant_id
-           AND idempotency_key=candidate
-      );
-      suffix := suffix + 1;
-    END LOOP;
-    UPDATE job_requests SET idempotency_key=candidate WHERE job_id=duplicate_row.job_id;
-  END LOOP;
-END $$;
+WITH ranked AS (
+  SELECT job_id,row_number() OVER (
+    PARTITION BY tenant_id,idempotency_key
+    ORDER BY CASE WHEN caller_id='legacy' THEN 0 ELSE 1 END,job_id
+  ) AS ordinal
+  FROM job_requests
+), maximum_key AS (
+  SELECT COALESCE(max(char_length(idempotency_key)),0)+1 AS pad_length
+  FROM job_requests
+), replacements AS (
+  SELECT ranked.job_id,repeat('r',maximum_key.pad_length) || ':' || ranked.job_id::text AS replacement
+  FROM ranked CROSS JOIN maximum_key
+  WHERE ranked.ordinal > 1
+)
+UPDATE job_requests AS request
+   SET idempotency_key=replacements.replacement
+  FROM replacements
+ WHERE request.job_id=replacements.job_id;
 ALTER TABLE job_requests
   DROP COLUMN resource,
   DROP COLUMN api_version,
