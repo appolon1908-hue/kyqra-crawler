@@ -105,5 +105,6 @@ describe('canonical production API contract', () => {
     expect(worker).toContain("serviceWorkers = 'block'");
     expect(worker).toContain('useIncognitoPages: true');
     expect(dockerfile).toContain('/root/.npm');
+    expect(dockerfile).toContain('FROM scratch');
   });
 });
