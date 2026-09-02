@@ -1,3 +1,5 @@
+import http from 'node:http';
+
 import { describe, expect, it } from 'vitest';
 
 import { jobSpecSchema } from '../../src/config/schema.js';
@@ -18,6 +20,7 @@ import {
   isCallbackAllowed,
   isProhibitedAddress,
 } from '../../src/delivery/security.js';
+import { createPinnedCrawlProxy } from '../../src/delivery/pinned-proxy.js';
 import { extractGenericData } from '../../src/extract/generic.js';
 import { canonicalizeUrl, urlHash } from '../../src/frontier/canonicalize.js';
 
@@ -85,6 +88,49 @@ describe('crawler core behavior', () => {
     );
     expect(() => crawlWebSocketGuardTarget('https://example.test/socket')).toThrow(
       'crawl_target_denied',
+    );
+  });
+
+  it('forwards browser traffic to the exact address returned by the target policy', async () => {
+    const upstream = http.createServer((_request, response) => response.end('pinned-response'));
+    await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve));
+    const upstreamAddress = upstream.address();
+    expect(upstreamAddress && typeof upstreamAddress !== 'string').toBe(true);
+    if (!upstreamAddress || typeof upstreamAddress === 'string')
+      throw new Error('fixture_bind_failed');
+    const resolvedTargets: string[] = [];
+    const proxy = await createPinnedCrawlProxy(async (rawUrl) => {
+      resolvedTargets.push(rawUrl);
+      return {
+        hostname: new URL(rawUrl).hostname,
+        addresses: [{ address: '127.0.0.1', family: 4 }],
+      };
+    });
+    const proxyAddress = new URL(proxy.url);
+    const body = await new Promise<string>((resolve, reject) => {
+      http
+        .get(
+          {
+            hostname: proxyAddress.hostname,
+            port: proxyAddress.port,
+            path: `http://dns-must-not-resolve.invalid:${upstreamAddress.port}/pinned`,
+          },
+          (response) => {
+            let value = '';
+            response.setEncoding('utf8');
+            response.on('data', (chunk: string) => (value += chunk));
+            response.on('end', () => resolve(value));
+          },
+        )
+        .on('error', reject);
+    });
+    expect(body).toBe('pinned-response');
+    expect(resolvedTargets).toEqual([
+      `http://dns-must-not-resolve.invalid:${upstreamAddress.port}/pinned`,
+    ]);
+    await proxy.close();
+    await new Promise<void>((resolve, reject) =>
+      upstream.close((error) => (error ? reject(error) : resolve())),
     );
   });
 

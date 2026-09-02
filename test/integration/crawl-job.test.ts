@@ -15,6 +15,7 @@ import { removeCrawlJob } from '../../src/queues/crawl.js';
 import { closeRuntime, createRuntime } from '../../src/runtime.js';
 import type { JobSpec } from '../../src/config/schema.js';
 import { migrateDatabase } from '../../src/storage/postgres/migrate.js';
+import { insertResult } from '../../src/storage/postgres/repository.js';
 import type { CallbackJobData, Runtime } from '../../src/types.js';
 import { createCrawlWorker } from '../../src/workers/crawl.js';
 import { startFixtureSite, type FixtureSite } from '../fixtures/site/server.js';
@@ -225,6 +226,28 @@ describe('HTTP job submission through real Redis and Postgres', () => {
     expect(submission.body.status).toBe('queued');
     const jobId = String(submission.body.id);
     await waitForCompleted(client, jobId);
+
+    expect(
+      await insertResult(
+        runtime.db,
+        jobId,
+        `${fixture.baseUrl}/late-result`,
+        'late-result-after-completion',
+        {
+          business_name: 'Late result',
+          website: '',
+          description: '',
+          phone: [],
+          email: [],
+          address: '',
+          page_title: '',
+          schema_org: [],
+          source_url: `${fixture.baseUrl}/late-result`,
+          crawl_timestamp: new Date(0).toISOString(),
+        },
+        {},
+      ),
+    ).toBe(0);
 
     const status = await client
       .get(`/api/v1/jobs/${jobId}`)

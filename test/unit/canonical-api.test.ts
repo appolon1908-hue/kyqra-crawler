@@ -105,8 +105,12 @@ describe('canonical production API contract', () => {
     expect(worker).toContain("serviceWorkers = 'block'");
     expect(worker).toContain("page.routeWebSocket('**/*'");
     expect(worker).toContain('crawlWebSocketGuardTarget(webSocket.url())');
+    expect(worker).toContain('createPinnedCrawlProxy(resolveTarget)');
+    expect(worker).toContain('proxyUrl: pinnedProxy.url');
     expect(worker).toContain('useIncognitoPages: true');
     expect(dockerfile).toContain('/root/.npm');
     expect(dockerfile).toContain('FROM scratch');
+    const repository = fs.readFileSync('src/storage/postgres/repository.ts', 'utf8');
+    expect(repository).toContain("status='running' for update");
   });
 });

@@ -145,10 +145,12 @@ export const createPinnedCallbackAgent = async (rawUrl: string): Promise<Agent> 
   });
 };
 
-interface ResolvedCrawlTarget {
+export interface ResolvedCrawlTarget {
   hostname: string;
   addresses: Array<{ address: string; family: number }>;
 }
+
+export type CrawlTargetResolver = (rawUrl: string) => Promise<ResolvedCrawlTarget>;
 
 const resolveCrawlTarget = async (rawUrl: string): Promise<ResolvedCrawlTarget> => {
   let url: URL;
@@ -182,14 +184,22 @@ export const validateCrawlTarget = async (rawUrl: string): Promise<void> => {
   await resolveCrawlTarget(rawUrl);
 };
 
-export const createCrawlTargetGuard = (): ((rawUrl: string) => Promise<void>) => {
+export const createCrawlTargetResolver = (): CrawlTargetResolver => {
   const fingerprints = new Map<string, string>();
-  return async (rawUrl: string): Promise<void> => {
+  return async (rawUrl: string): Promise<ResolvedCrawlTarget> => {
     const resolved = await resolveCrawlTarget(rawUrl);
     const fingerprint = resolved.addresses.map(({ address }) => address).join(',');
     const prior = fingerprints.get(resolved.hostname);
     if (prior && prior !== fingerprint) throw new Error('crawl_target_dns_rebinding');
     fingerprints.set(resolved.hostname, fingerprint);
+    return resolved;
+  };
+};
+
+export const createCrawlTargetGuard = (): ((rawUrl: string) => Promise<void>) => {
+  const resolve = createCrawlTargetResolver();
+  return async (rawUrl: string): Promise<void> => {
+    await resolve(rawUrl);
   };
 };
 
@@ -201,8 +211,11 @@ export const crawlWebSocketGuardTarget = (rawUrl: string): string => {
   return target.toString();
 };
 
-export const createPinnedCrawlLookup = async (rawUrl: string): Promise<net.LookupFunction> => {
-  const initial = await resolveCrawlTarget(rawUrl);
+export const createPinnedCrawlLookup = async (
+  rawUrl: string,
+  resolve: CrawlTargetResolver = resolveCrawlTarget,
+): Promise<net.LookupFunction> => {
+  const initial = await resolve(rawUrl);
   const pinned = new Map<string, ResolvedCrawlTarget['addresses']>([
     [initial.hostname, initial.addresses],
   ]);
@@ -231,7 +244,7 @@ export const createPinnedCrawlLookup = async (rawUrl: string): Promise<net.Looku
     const existing = pinned.get(normalized);
     if (existing) return respond(existing);
     validateCrawlHostname(normalized);
-    void resolveCrawlTarget(`https://${normalized}/`).then(
+    void resolve(`https://${normalized}/`).then(
       (resolved) => {
         pinned.set(normalized, resolved.addresses);
         respond(resolved.addresses);

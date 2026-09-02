@@ -79,6 +79,25 @@ DROP FUNCTION set_job_status(uuid,text,text);
 ALTER TABLE jobs DROP CONSTRAINT jobs_status_allowed;
 DROP TABLE command_requests;
 DROP INDEX job_requests_semantic_idempotency;
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM job_requests
+    GROUP BY tenant_id,idempotency_key HAVING count(*) > 1
+  ) THEN
+    UPDATE job_requests SET idempotency_key='v3-rollback-original:' || idempotency_key;
+    WITH ranked AS (
+      SELECT job_id,row_number() OVER (
+        PARTITION BY tenant_id,idempotency_key ORDER BY job_id
+      ) AS ordinal
+      FROM job_requests
+    )
+    UPDATE job_requests AS request
+       SET idempotency_key='v3-rollback-duplicate:' || request.job_id::text
+      FROM ranked
+     WHERE ranked.job_id=request.job_id AND ranked.ordinal > 1;
+  END IF;
+END $$;
 ALTER TABLE job_requests
   DROP COLUMN resource,
   DROP COLUMN api_version,

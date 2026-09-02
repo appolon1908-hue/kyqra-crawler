@@ -13,10 +13,11 @@ import { browserConcurrency, httpConcurrency, jobConcurrency } from '../config/e
 import { jobSpecSchema, type JobSpec } from '../config/schema.js';
 import {
   crawlWebSocketGuardTarget,
-  createCrawlTargetGuard,
+  createCrawlTargetResolver,
   createPinnedCrawlLookup,
   validateCrawlRedirectTarget,
 } from '../delivery/security.js';
+import { createPinnedCrawlProxy, type PinnedCrawlProxy } from '../delivery/pinned-proxy.js';
 import { extractGenericData } from '../extract/generic.js';
 import { canonicalizeUrl, urlHash } from '../frontier/canonicalize.js';
 import { log } from '../observability/logger.js';
@@ -132,7 +133,10 @@ export const processCrawlJob = async (
     records: durableRecords,
     failed: priorProgress.failed,
   };
-  const guardTarget = createCrawlTargetGuard();
+  const resolveTarget = createCrawlTargetResolver();
+  const guardTarget = async (rawUrl: string): Promise<void> => {
+    await resolveTarget(rawUrl);
+  };
   const routedPages = new WeakSet<object>();
   if (!(await markJobRunning(runtime.db, jobId))) {
     job.discard();
@@ -145,6 +149,7 @@ export const processCrawlJob = async (
   // while retaining isolation from every other concurrently running job.
   const crawlConfiguration = new Configuration({ purgeOnStart: false, persistStorage: true });
   let requestQueue: RequestQueue | undefined;
+  let pinnedProxy: PinnedCrawlProxy | undefined;
   const useBrowser = spec.browser === 'playwright';
   const commonOptions = {
     maxRequestsPerCrawl: spec.maxPages,
@@ -168,6 +173,7 @@ export const processCrawlJob = async (
       await requestQueue.addRequest({ url: canonicalizeUrl(url), userData: { depth: 0 } });
     }
     if (useBrowser) {
+      pinnedProxy = await createPinnedCrawlProxy(resolveTarget);
       await new PlaywrightCrawler(
         {
           ...commonOptions,
@@ -213,6 +219,7 @@ export const processCrawlJob = async (
             ],
           },
           launchContext: {
+            proxyUrl: pinnedProxy.url,
             useIncognitoPages: true,
             launchOptions: { headless: true, args: ['--disable-dev-shm-usage'] },
           },
@@ -243,7 +250,7 @@ export const processCrawlJob = async (
                 throw new NonRetryableError('job_no_longer_running');
               }
               await guardTarget(request.url);
-              gotOptions.dnsLookup = await createPinnedCrawlLookup(request.url);
+              gotOptions.dnsLookup = await createPinnedCrawlLookup(request.url, resolveTarget);
               gotOptions.maxRedirects = 5;
               gotOptions.followRedirect = (response) => {
                 const location = response.headers.location;
@@ -288,6 +295,7 @@ export const processCrawlJob = async (
     }
     throw error;
   } finally {
+    await pinnedProxy?.close();
     await requestQueue?.drop().catch((error: unknown) => {
       log('warn', 'request_queue_cleanup_failed', { jobId, error: errorMessage(error) });
     });

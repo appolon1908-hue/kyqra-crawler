@@ -108,7 +108,12 @@ export const insertResult = async (
   provenance: Record<string, string>,
 ): Promise<number> => {
   const result = await db.query(
-    'insert into results(job_id,url,url_hash,data,provenance) values($1,$2,$3,$4,$5) on conflict do nothing returning id',
+    `with runnable as (
+       select id from jobs where id=$1 and status='running' for update
+     )
+     insert into results(job_id,url,url_hash,data,provenance)
+     select id,$2,$3,$4,$5 from runnable
+     on conflict do nothing returning id`,
     [jobId, url, urlHash, data, provenance],
   );
   return result.rowCount ?? 0;
