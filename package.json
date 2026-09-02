@@ -46,6 +46,8 @@
     "@types/pg": "8.15.5",
     "@types/supertest": "7.2.1",
     "@vitest/coverage-v8": "4.1.11",
+    "ajv": "8.20.0",
+    "ajv-formats": "3.0.1",
     "eslint": "9.34.0",
     "express": "5.2.1",
     "prettier": "3.6.2",

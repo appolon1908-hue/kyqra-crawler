@@ -20,10 +20,13 @@ export interface CallbackJobData {
   event?: string;
 }
 
+export type CrawlWorkerKind = 'http' | 'browser';
+
 export interface Runtime {
   db: Pool;
   redis: Redis;
-  crawlQueue: Queue<JobSpec>;
+  httpCrawlQueue: Queue<JobSpec>;
+  browserCrawlQueue: Queue<JobSpec>;
   callbackQueue: Queue<CallbackJobData>;
   redisConnection: RedisConnectionOptions;
 }

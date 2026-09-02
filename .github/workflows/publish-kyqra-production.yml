@@ -71,7 +71,9 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: ${{ env.IMAGE }}:candidate-${{ github.run_id }}-${{ github.run_attempt }}
-          build-args: SOURCE_DATE_EPOCH=${{ steps.source.outputs.epoch }}
+          build-args: |
+            SOURCE_DATE_EPOCH=${{ steps.source.outputs.epoch }}
+            SOURCE_COMMIT_SHA=${{ env.SOURCE_SHA }}
           labels: |
             org.opencontainers.image.revision=${{ env.SOURCE_SHA }}
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
