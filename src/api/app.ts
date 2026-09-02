@@ -227,12 +227,14 @@ export const buildApi = async (runtime: Runtime): Promise<FastifyInstance> => {
       reply,
       { action: 'job.cancel', resource: `jobs/${request.params.id}`, payload: {} },
       async () => {
-        await removeCrawlJob(runtime, request.params.id).catch(() => undefined);
         const cancelled = await cancelJob(
           runtime.db,
           request.params.id,
           request.servicePrincipal.tenant_id,
         );
+        if (cancelled) {
+          await removeCrawlJob(runtime, request.params.id).catch(() => undefined);
+        }
         return cancelled
           ? { code: 200, body: { id: request.params.id, status: 'cancelled' } }
           : { code: 409, body: { id: request.params.id, error: 'job_terminal' } };
@@ -262,7 +264,6 @@ export const buildApi = async (runtime: Runtime): Promise<FastifyInstance> => {
         if (!['failed', 'cancelled'].includes(status.status)) {
           return { code: 409, body: { id: request.params.id, error: 'job_not_retryable' } };
         }
-        await removeCrawlJob(runtime, request.params.id).catch(() => undefined);
         const reset = await resetJobQueued(
           runtime.db,
           request.params.id,
@@ -271,9 +272,15 @@ export const buildApi = async (runtime: Runtime): Promise<FastifyInstance> => {
         if (!reset) {
           return { code: 409, body: { id: request.params.id, error: 'job_state_changed' } };
         }
-        await crawlQueueForSpec(runtime, payload).add('crawl', payload, {
-          jobId: request.params.id,
-        });
+        try {
+          await removeCrawlJob(runtime, request.params.id);
+          await crawlQueueForSpec(runtime, payload).add('crawl', payload, {
+            jobId: request.params.id,
+          });
+        } catch (error: unknown) {
+          await markJobFailed(runtime.db, request.params.id, 'queue_retry_failed');
+          throw error;
+        }
         return { code: 202, body: { id: request.params.id, status: 'accepted' } };
       },
     );

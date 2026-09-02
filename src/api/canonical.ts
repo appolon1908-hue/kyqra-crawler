@@ -2,15 +2,21 @@ import type { FastifyInstance, FastifyReply } from 'fastify';
 
 import {
   cancelJob,
+  checkPostgresReady,
   getJobEvents,
   getJobPayload,
   getJobStatus,
   listJobs,
   ownsJob,
   resetJobQueued,
+  markJobFailed,
   type JobStatusRow,
 } from '../storage/postgres/repository.js';
 import { crawlQueueForSpec, removeCrawlJob } from '../queues/crawl.js';
+import {
+  queueCompletionCallbacks,
+  storedCompletionProgress,
+} from '../queues/completion-callbacks.js';
 import type { Runtime } from '../types.js';
 import { executeDurableCommand } from './idempotency.js';
 import { kyqraOpenApi } from './openapi.js';
@@ -41,7 +47,7 @@ export const registerCanonicalApi = (app: FastifyInstance, runtime: Runtime): vo
   app.get('/health/live', async () => ({ status: 'live' }));
   app.get('/health/ready', async () => {
     await runtime.redis.ping();
-    await runtime.db.query('select 1');
+    await checkPostgresReady(runtime.db);
     return { status: 'ready', redis: 'ok', postgres: 'ok' };
   });
   app.get('/openapi.json', async () => kyqraOpenApi);
@@ -117,12 +123,14 @@ export const registerCanonicalApi = (app: FastifyInstance, runtime: Runtime): vo
       reply,
       { action: 'operation.cancel', resource: `operations/${request.params.id}`, payload: {} },
       async () => {
-        await removeCrawlJob(runtime, request.params.id).catch(() => undefined);
         const cancelled = await cancelJob(
           runtime.db,
           request.params.id,
           request.servicePrincipal.tenant_id,
         );
+        if (cancelled) {
+          await removeCrawlJob(runtime, request.params.id).catch(() => undefined);
+        }
         return cancelled
           ? {
               code: 200,
@@ -152,6 +160,24 @@ export const registerCanonicalApi = (app: FastifyInstance, runtime: Runtime): vo
       reply,
       { action: 'operation.reconcile', resource: `operations/${request.params.id}`, payload: {} },
       async () => {
+        const payload = await getJobPayload(runtime.db, job.id, request.servicePrincipal.tenant_id);
+        if (!payload) return { code: 404, body: { error: 'not_found' } };
+        if (job.status === 'completed') {
+          await queueCompletionCallbacks(
+            runtime,
+            job.id,
+            payload,
+            storedCompletionProgress(job.progress),
+          );
+          return {
+            code: 202,
+            body: {
+              operation_id: job.id,
+              status: 'SUCCEEDED',
+              callbacks_reconciled: true,
+            },
+          };
+        }
         if (!['failed', 'cancelled'].includes(job.status)) {
           return {
             code: 200,
@@ -162,8 +188,6 @@ export const registerCanonicalApi = (app: FastifyInstance, runtime: Runtime): vo
             },
           };
         }
-        const payload = await getJobPayload(runtime.db, job.id, request.servicePrincipal.tenant_id);
-        if (!payload) return { code: 404, body: { error: 'not_found' } };
         const reset = await resetJobQueued(runtime.db, job.id, request.servicePrincipal.tenant_id);
         if (!reset) {
           return {
@@ -171,7 +195,13 @@ export const registerCanonicalApi = (app: FastifyInstance, runtime: Runtime): vo
             body: { operation_id: job.id, error: 'operation_state_changed' },
           };
         }
-        await crawlQueueForSpec(runtime, payload).add('crawl', payload, { jobId: job.id });
+        try {
+          await removeCrawlJob(runtime, job.id);
+          await crawlQueueForSpec(runtime, payload).add('crawl', payload, { jobId: job.id });
+        } catch (error: unknown) {
+          await markJobFailed(runtime.db, job.id, 'queue_reconcile_failed');
+          throw error;
+        }
         return {
           code: 202,
           body: {

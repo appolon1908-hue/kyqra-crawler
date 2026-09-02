@@ -93,4 +93,13 @@ describe('canonical production API contract', () => {
     expect(migration).toContain('job_requests_semantic_idempotency');
     expect(migration).toContain('-- Down Migration');
   });
+
+  it('uses schema-aware canonical readiness and a callback-only recovery path', () => {
+    const canonical = fs.readFileSync('src/api/canonical.ts', 'utf8');
+    const worker = fs.readFileSync('src/workers/crawl.ts', 'utf8');
+    expect(canonical).toContain('await checkPostgresReady(runtime.db)');
+    expect(canonical).toContain('callbacks_reconciled: true');
+    expect(worker).toContain("existing?.status === 'completed'");
+    expect(worker).toContain('job.attemptsMade + 1 >= configuredAttempts');
+  });
 });

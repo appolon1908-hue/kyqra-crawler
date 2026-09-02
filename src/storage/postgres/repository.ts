@@ -30,6 +30,11 @@ export interface JobStatusRow {
   correlation_id: string;
 }
 
+export interface InternalJobState {
+  status: string;
+  progress: Record<string, unknown>;
+}
+
 export interface JobResultRow {
   data: ExtractionData;
   provenance: Record<string, string>;
@@ -57,9 +62,31 @@ export const getInternalJobStatus = async (db: Pool, jobId: string): Promise<str
   return result.rows[0]?.status ?? null;
 };
 
+export const getInternalJobState = async (
+  db: Pool,
+  jobId: string,
+): Promise<InternalJobState | null> => {
+  const result = await db.query<InternalJobState>(
+    'select status,progress from jobs where id=$1',
+    [jobId],
+  );
+  return result.rows[0] ?? null;
+};
+
 export const markJobRunning = async (db: Pool, jobId: string): Promise<boolean> => {
-  await db.query("select set_job_status($1,'running',$2)", [jobId, null]);
-  return (await getInternalJobStatus(db, jobId)) === 'running';
+  const result = await db.query(
+    `with claimed as (
+       update jobs
+          set status='running',started_at=coalesce(started_at,now()),updated_at=now()
+        where id=$1 and status in ('queued','running')
+        returning id,tenant_id
+     )
+     insert into job_events(job_id,tenant_id,event_type,status,payload)
+     select id,tenant_id,'job.running','running','{}'::jsonb from claimed
+     returning job_id`,
+    [jobId],
+  );
+  return (result.rowCount ?? 0) === 1;
 };
 
 export const insertResult = async (

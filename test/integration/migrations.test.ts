@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { buildApi } from '../../src/api/app.js';
 import { migrateDatabase } from '../../src/storage/postgres/migrate.js';
+import { markJobRunning } from '../../src/storage/postgres/repository.js';
 import type { Runtime } from '../../src/types.js';
 
 const POSTGRES_IMAGE =
@@ -110,6 +111,27 @@ describe('PostgreSQL migrations', () => {
 
     await migrateDatabase(databaseUrl, 'up');
     expect(await applicationTables()).toEqual(targetTables);
+
+    const automaticRetryJobId = '00000000-0000-4000-8000-000000000003';
+    await db.query(
+      "insert into jobs(id,tenant_id,status,spec,budget) values($1,'retry-tenant','queued',$2,$3)",
+      [automaticRetryJobId, { startUrls: ['https://fixture.test'] }, {}],
+    );
+    await db.query(
+      `insert into job_requests(
+         job_id,idempotency_key,request_hash,correlation_id,tenant_id,caller_id
+       ) values($1,'automatic-retry','retry-hash','retry-correlation','retry-tenant','retry-caller')`,
+      [automaticRetryJobId],
+    );
+    expect(await markJobRunning(db, automaticRetryJobId)).toBe(true);
+    expect(await markJobRunning(db, automaticRetryJobId)).toBe(true);
+    const attempts = await db.query<{ count: string }>(
+      "select count(*)::text as count from job_events where job_id=$1 and status='running'",
+      [automaticRetryJobId],
+    );
+    expect(attempts.rows[0]?.count).toBe('2');
+    await db.query('delete from job_requests where job_id=$1', [automaticRetryJobId]);
+    await db.query('delete from jobs where id=$1', [automaticRetryJobId]);
 
     await migrateDatabase(databaseUrl, 'down', 2);
     const legacyJobId = '00000000-0000-4000-8000-000000000002';

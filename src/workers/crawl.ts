@@ -14,29 +14,28 @@ import { jobSpecSchema, type JobSpec } from '../config/schema.js';
 import {
   createCrawlTargetGuard,
   createPinnedCrawlLookup,
-  isCallbackAllowed,
   validateCrawlRedirectTarget,
 } from '../delivery/security.js';
 import { extractGenericData } from '../extract/generic.js';
 import { canonicalizeUrl, urlHash } from '../frontier/canonicalize.js';
 import { log } from '../observability/logger.js';
+import {
+  queueCompletionCallbacks,
+  storedCompletionProgress,
+  type CompletionProgress,
+} from '../queues/completion-callbacks.js';
 import { crawlQueueForKind } from '../queues/crawl.js';
 import {
-  getJobMetadata,
+  getInternalJobState,
   getInternalJobStatus,
   insertResult,
-  listResultsForCallbacks,
   markJobCompleted,
   markJobFailed,
   markJobRunning,
 } from '../storage/postgres/repository.js';
 import type { CrawlWorkerKind, Runtime } from '../types.js';
 
-interface CrawlProgress {
-  processed: number;
-  records: number;
-  failed: number;
-}
+type CrawlProgress = CompletionProgress;
 
 interface PageRequestData {
   depth?: number;
@@ -111,65 +110,6 @@ const processPage = async (
   await job.updateProgress(progress);
 };
 
-const queueCompletionCallbacks = async (
-  runtime: Runtime,
-  jobId: string,
-  spec: JobSpec,
-  progress: CrawlProgress,
-): Promise<void> => {
-  const middlewareBaseUrl = (process.env.MIDDLEWARE_BASE_URL || '').replace(/\/$/, '');
-  const metadata = await getJobMetadata(runtime.db, jobId);
-  if (middlewareBaseUrl) {
-    const rows = await listResultsForCallbacks(runtime.db, jobId);
-    for (const row of rows) {
-      await runtime.callbackQueue.add(
-        'result',
-        {
-          jobId,
-          url: `${middlewareBaseUrl}/api/v1/kyqra/results`,
-          payload: {
-            job_id: jobId,
-            tenant_id: metadata?.tenant_id ?? null,
-            correlation_id: metadata?.correlation_id ?? null,
-            record_id: row.id,
-            ...row.data,
-            category: row.data.category ?? null,
-            confidence: row.data.confidence ?? null,
-            provenance: row.provenance,
-          },
-        },
-        { jobId: `kyqra-result-${jobId}-${row.id}` },
-      );
-    }
-    await runtime.callbackQueue.add(
-      'progress',
-      {
-        jobId,
-        url: `${middlewareBaseUrl}/api/v1/kyqra/progress`,
-        payload: {
-          job_id: jobId,
-          tenant_id: metadata?.tenant_id ?? null,
-          correlation_id: metadata?.correlation_id ?? null,
-          status: 'completed',
-          ...progress,
-        },
-      },
-      { jobId: `kyqra-progress-${jobId}` },
-    );
-  }
-  if (spec.callbackUrl && isCallbackAllowed(spec.callbackUrl)) {
-    await runtime.callbackQueue.add(
-      'complete',
-      {
-        jobId,
-        url: spec.callbackUrl,
-        payload: { job_id: jobId, status: 'completed', ...progress },
-      },
-      { jobId: `kyqra-complete-${jobId}` },
-    );
-  }
-};
-
 export const processCrawlJob = async (
   runtime: Runtime,
   job: Job<JobSpec>,
@@ -177,10 +117,15 @@ export const processCrawlJob = async (
   const spec = jobSpecSchema.parse(job.data);
   const jobId = job.id;
   if (!jobId) throw new Error('job_id_required');
+  const existing = await getInternalJobState(runtime.db, jobId);
+  if (existing?.status === 'completed') {
+    const completedProgress = storedCompletionProgress(existing.progress);
+    await queueCompletionCallbacks(runtime, jobId, spec, completedProgress);
+    return completedProgress;
+  }
   const progress: CrawlProgress = { processed: 0, records: 0, failed: 0 };
   const guardTarget = createCrawlTargetGuard();
   const routedPages = new WeakSet<object>();
-  await Promise.all(spec.startUrls.map((url) => guardTarget(url)));
   if (!(await markJobRunning(runtime.db, jobId))) {
     job.discard();
     throw new NonRetryableError('job_not_runnable');
@@ -191,16 +136,9 @@ export const processCrawlJob = async (
   // job with zero processed requests. A job-scoped configuration preserves its frontier
   // while retaining isolation from every other concurrently running job.
   const crawlConfiguration = new Configuration({ purgeOnStart: false, persistStorage: true });
-  const requestQueue = await RequestQueue.open(
-    `job-${jobId}-${job.timestamp}-${job.attemptsMade}`,
-    { config: crawlConfiguration },
-  );
-  for (const url of spec.startUrls) {
-    await requestQueue.addRequest({ url: canonicalizeUrl(url), userData: { depth: 0 } });
-  }
+  let requestQueue: RequestQueue | undefined;
   const useBrowser = spec.browser === 'playwright';
   const commonOptions = {
-    requestQueue,
     maxRequestsPerCrawl: spec.maxPages,
     maxRequestRetries: 2,
     requestHandlerTimeoutSecs: 60,
@@ -213,10 +151,18 @@ export const processCrawlJob = async (
   };
 
   try {
+    await Promise.all(spec.startUrls.map((url) => guardTarget(url)));
+    requestQueue = await RequestQueue.open(`job-${jobId}-${job.timestamp}-${job.attemptsMade}`, {
+      config: crawlConfiguration,
+    });
+    for (const url of spec.startUrls) {
+      await requestQueue.addRequest({ url: canonicalizeUrl(url), userData: { depth: 0 } });
+    }
     if (useBrowser) {
       await new PlaywrightCrawler(
         {
           ...commonOptions,
+          requestQueue,
           preNavigationHooks: [
             async ({ request, page }) => {
               if ((await getInternalJobStatus(runtime.db, jobId)) !== 'running') {
@@ -263,6 +209,7 @@ export const processCrawlJob = async (
       await new CheerioCrawler(
         {
           ...commonOptions,
+          requestQueue,
           preNavigationHooks: [
             async ({ request }, gotOptions) => {
               if ((await getInternalJobStatus(runtime.db, jobId)) !== 'running') {
@@ -305,10 +252,14 @@ export const processCrawlJob = async (
     await queueCompletionCallbacks(runtime, jobId, spec, progress);
     return progress;
   } catch (error: unknown) {
-    await markJobFailed(runtime.db, jobId, errorMessage(error));
+    const configuredAttempts = Math.max(1, Number(job.opts.attempts ?? 1));
+    const finalAttempt = job.attemptsMade + 1 >= configuredAttempts;
+    if (finalAttempt || error instanceof NonRetryableError) {
+      await markJobFailed(runtime.db, jobId, errorMessage(error));
+    }
     throw error;
   } finally {
-    await requestQueue.drop().catch((error: unknown) => {
+    await requestQueue?.drop().catch((error: unknown) => {
       log('warn', 'request_queue_cleanup_failed', { jobId, error: errorMessage(error) });
     });
   }

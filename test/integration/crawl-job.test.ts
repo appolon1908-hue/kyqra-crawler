@@ -258,6 +258,17 @@ describe('HTTP job submission through real Redis and Postgres', () => {
       .get(`/api/v1/operations/${jobId}`)
       .set('Authorization', `Bearer ${API_TOKEN}`);
     expect(operation.body).toMatchObject({ operation_id: jobId, status: 'SUCCEEDED' });
+    const callbackRecovery = await client
+      .post(`/api/v1/operations/${jobId}/reconcile`)
+      .set('Authorization', `Bearer ${API_TOKEN}`)
+      .set('Idempotency-Key', 'fixture-callback-reconcile-1')
+      .set('X-Correlation-Id', 'fixture-callback-reconcile-1');
+    expect(callbackRecovery.status).toBe(202);
+    expect(callbackRecovery.body).toMatchObject({
+      operation_id: jobId,
+      status: 'SUCCEEDED',
+      callbacks_reconciled: true,
+    });
     expect(
       (await client.get('/metrics').set('Authorization', `Bearer ${READONLY_TOKEN}`)).status,
     ).toBe(403);
@@ -337,6 +348,46 @@ describe('HTTP job submission through real Redis and Postgres', () => {
       .get(`/api/v1/jobs/${slowJobId}/results`)
       .set('Authorization', `Bearer ${API_TOKEN}`);
     expect(retriedResults.body.count).toBe(1);
+
+    await runtime.httpCrawlQueue.pause();
+    const raceSubmission = await client
+      .post('/api/v1/jobs')
+      .set('Authorization', `Bearer ${API_TOKEN}`)
+      .set('Idempotency-Key', 'retry-race-submit-1')
+      .set('X-Correlation-Id', 'retry-race-submit-1')
+      .send({
+        startUrls: [`${fixture.baseUrl}/static`],
+        mode: 'single',
+        maxPages: 1,
+        maxDepth: 0,
+        browser: 'http',
+      });
+    expect(raceSubmission.status).toBe(202);
+    const raceJobId = String(raceSubmission.body.id);
+    const raceCancel = await client
+      .post(`/api/v1/jobs/${raceJobId}/cancel`)
+      .set('Authorization', `Bearer ${API_TOKEN}`)
+      .set('Idempotency-Key', 'retry-race-cancel-1')
+      .set('X-Correlation-Id', 'retry-race-cancel-1');
+    expect(raceCancel.status).toBe(200);
+    const raceRetries = await Promise.all(
+      ['retry-race-command-a', 'retry-race-command-b'].map((key) =>
+        client
+          .post(`/api/v1/jobs/${raceJobId}/retry`)
+          .set('Authorization', `Bearer ${API_TOKEN}`)
+          .set('Idempotency-Key', key)
+          .set('X-Correlation-Id', key),
+      ),
+    );
+    expect(raceRetries.map(({ status }) => status).sort()).toEqual([202, 409]);
+    const raceState = await runtime.db.query<{ status: string }>(
+      'select status from jobs where id=$1',
+      [raceJobId],
+    );
+    expect(raceState.rows[0]?.status).toBe('queued');
+    expect(await runtime.httpCrawlQueue.getJob(raceJobId)).toBeDefined();
+    await runtime.httpCrawlQueue.resume();
+    await waitForCompleted(client, raceJobId);
 
     for (const endpoint of [
       `/api/v1/jobs/${crypto.randomUUID()}`,
