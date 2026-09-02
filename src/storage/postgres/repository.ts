@@ -18,6 +18,7 @@ export interface IdempotentJob {
   job_id: string;
   request_hash: string;
   correlation_id: string;
+  enqueue_outcome: 'PENDING' | 'QUEUED' | 'FAILED';
   status: string;
   error: string | null;
 }
@@ -56,6 +57,7 @@ export interface CommandRequestRow {
 export const checkPostgresReady = async (db: Pool): Promise<void> => {
   await db.query('select tenant_id,spec,budget from jobs limit 0');
   await db.query('select tenant_id,event_type,status from job_events limit 0');
+  await db.query('select tenant_id,caller_id,enqueue_outcome from job_requests limit 0');
   await db.query('select tenant_id,caller_id,action,status from command_requests limit 0');
 };
 
@@ -158,13 +160,26 @@ export const findIdempotentJob = async (
   idempotencyKey: string,
 ): Promise<IdempotentJob | null> => {
   const result = await db.query<IdempotentJob>(
-    `select m.job_id,m.request_hash,m.correlation_id,j.status,j.error
+    `select m.job_id,m.request_hash,m.correlation_id,m.enqueue_outcome,j.status,j.error
        from job_requests m join jobs j on j.id=m.job_id
       where m.tenant_id=$1 and m.caller_id=$2 and m.action='crawl.job.create'
         and m.api_version='api/v1' and m.resource='jobs' and m.idempotency_key=$3`,
     [tenantId, callerId, idempotencyKey],
   );
   return result.rows[0] ?? null;
+};
+
+export const recordJobEnqueueOutcome = async (
+  db: Pool,
+  jobId: string,
+  outcome: 'QUEUED' | 'FAILED',
+): Promise<void> => {
+  const result = await db.query(
+    `update job_requests set enqueue_outcome=$2
+      where job_id=$1 and enqueue_outcome in ('PENDING',$2) returning job_id`,
+    [jobId, outcome],
+  );
+  if ((result.rowCount ?? 0) !== 1) throw new Error('enqueue_outcome_not_recorded');
 };
 
 const insertJobTransaction = async (
@@ -187,8 +202,8 @@ const insertJobTransaction = async (
     await client.query(
       `insert into job_requests(
          job_id,idempotency_key,request_hash,correlation_id,tenant_id,
-         caller_id,action,api_version,resource
-       ) values($1,$2,$3,$4,$5,$6,'crawl.job.create','api/v1','jobs')`,
+         caller_id,action,api_version,resource,enqueue_outcome
+       ) values($1,$2,$3,$4,$5,$6,'crawl.job.create','api/v1','jobs','PENDING')`,
       [jobId, idempotencyKey, requestHash, correlationId, tenantId, callerId],
     );
     await client.query(

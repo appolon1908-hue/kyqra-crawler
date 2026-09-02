@@ -134,6 +134,56 @@ describe('crawler core behavior', () => {
     );
   });
 
+  it('routes WebSockets from every browser page through the pinned target proxy', async () => {
+    let receivedPath = '';
+    const upstream = http.createServer();
+    upstream.on('upgrade', (request, socket) => {
+      receivedPath = request.url || '';
+      socket.end(
+        'HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n',
+      );
+    });
+    await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve));
+    const upstreamAddress = upstream.address();
+    expect(upstreamAddress && typeof upstreamAddress !== 'string').toBe(true);
+    if (!upstreamAddress || typeof upstreamAddress === 'string')
+      throw new Error('fixture_bind_failed');
+    const resolvedTargets: string[] = [];
+    const proxy = await createPinnedCrawlProxy(async (rawUrl) => {
+      resolvedTargets.push(rawUrl);
+      return {
+        hostname: new URL(rawUrl).hostname,
+        addresses: [{ address: '127.0.0.1', family: 4 }],
+      };
+    });
+    const proxyAddress = new URL(proxy.url);
+    await new Promise<void>((resolve, reject) => {
+      const request = http.request({
+        hostname: proxyAddress.hostname,
+        port: proxyAddress.port,
+        path: `ws://dns-must-not-resolve.invalid:${upstreamAddress.port}/socket`,
+        headers: { Connection: 'Upgrade', Upgrade: 'websocket' },
+      });
+      request.once('upgrade', (_response, socket) => {
+        socket.destroy();
+        resolve();
+      });
+      request.once('response', (response) =>
+        reject(new Error(`unexpected_proxy_response_${response.statusCode ?? 0}`)),
+      );
+      request.once('error', reject);
+      request.end();
+    });
+    expect(receivedPath).toBe('/socket');
+    expect(resolvedTargets).toEqual([
+      `http://dns-must-not-resolve.invalid:${upstreamAddress.port}/socket`,
+    ]);
+    await proxy.close();
+    await new Promise<void>((resolve, reject) =>
+      upstream.close((error) => (error ? reject(error) : resolve())),
+    );
+  });
+
   it('pins the documented internal callback exception without making a request', async () => {
     process.env.CALLBACK_ALLOWLIST = '10.40.0.1';
     const agent = await createPinnedCallbackAgent('http://10.40.0.1/events');

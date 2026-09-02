@@ -8,6 +8,7 @@ import {
   getJobStatus,
   listJobs,
   ownsJob,
+  recordJobEnqueueOutcome,
   resetJobQueued,
   markJobFailed,
   type JobStatusRow,
@@ -179,15 +180,25 @@ export const registerCanonicalApi = (app: FastifyInstance, runtime: Runtime): vo
           };
         }
         if (job.status === 'queued') {
-          if (await findCrawlJob(runtime, job.id)) {
-            return {
-              code: 200,
-              body: {
-                operation_id: job.id,
-                status: 'QUEUED',
-                reconciliation_required: false,
-              },
-            };
+          const queueJob = await findCrawlJob(runtime, job.id);
+          if (queueJob) {
+            const queueState = await queueJob.getState();
+            if (
+              ['active', 'delayed', 'prioritized', 'waiting', 'waiting-children'].includes(
+                queueState,
+              )
+            ) {
+              await recordJobEnqueueOutcome(runtime.db, job.id, 'QUEUED');
+              return {
+                code: 200,
+                body: {
+                  operation_id: job.id,
+                  status: 'QUEUED',
+                  reconciliation_required: false,
+                },
+              };
+            }
+            await removeCrawlJob(runtime, job.id);
           }
           try {
             await crawlQueueForSpec(runtime, payload).add('crawl', payload, { jobId: job.id });
@@ -195,6 +206,7 @@ export const registerCanonicalApi = (app: FastifyInstance, runtime: Runtime): vo
             await markJobFailed(runtime.db, job.id, 'queue_reconcile_failed');
             throw error;
           }
+          await recordJobEnqueueOutcome(runtime.db, job.id, 'QUEUED');
           return {
             code: 202,
             body: {

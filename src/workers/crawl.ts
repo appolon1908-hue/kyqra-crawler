@@ -12,7 +12,6 @@ import { PlaywrightCrawler } from '@crawlee/playwright';
 import { browserConcurrency, httpConcurrency, jobConcurrency } from '../config/env.js';
 import { jobSpecSchema, type JobSpec } from '../config/schema.js';
 import {
-  crawlWebSocketGuardTarget,
   createCrawlTargetResolver,
   createPinnedCrawlLookup,
   validateCrawlRedirectTarget,
@@ -187,6 +186,9 @@ export const processCrawlJob = async (
               await guardTarget(request.url);
               if (routedPages.has(page)) return;
               routedPages.add(page);
+              // Every page, popup, iframe, and WebSocket remains confined to
+              // the browser-wide pinned proxy. This route is a second policy
+              // check; continue() cannot bypass the proxy's validated address.
               await page.route('**/*', async (route) => {
                 const target = route.request().url();
                 const protocol = new URL(target).protocol;
@@ -198,14 +200,6 @@ export const processCrawlJob = async (
                   return route.continue();
                 } catch {
                   return route.abort('blockedbyclient');
-                }
-              });
-              await page.routeWebSocket('**/*', async (webSocket) => {
-                try {
-                  await guardTarget(crawlWebSocketGuardTarget(webSocket.url()));
-                  webSocket.connectToServer();
-                } catch {
-                  await webSocket.close({ code: 1008, reason: 'target_denied' });
                 }
               });
             },

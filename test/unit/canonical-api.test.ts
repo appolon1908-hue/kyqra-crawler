@@ -91,6 +91,7 @@ describe('canonical production API contract', () => {
     expect(migration).toContain('CREATE TABLE job_events');
     expect(migration).toContain('CREATE TABLE command_requests');
     expect(migration).toContain('job_requests_semantic_idempotency');
+    expect(migration).toContain('enqueue_outcome');
     expect(migration).toContain("caller_id='legacy'");
     expect(migration).toContain('max(char_length(idempotency_key))');
     expect(migration).not.toContain('LOOP');
@@ -106,8 +107,8 @@ describe('canonical production API contract', () => {
     expect(worker).toContain("existing?.status === 'completed'");
     expect(worker).toContain('job.attemptsMade + 1 >= configuredAttempts');
     expect(worker).toContain("serviceWorkers = 'block'");
-    expect(worker).toContain("page.routeWebSocket('**/*'");
-    expect(worker).toContain('crawlWebSocketGuardTarget(webSocket.url())');
+    expect(worker).not.toContain("page.routeWebSocket('**/*'");
+    expect(worker).toContain('browser-wide pinned proxy');
     expect(worker).toContain('createPinnedCrawlProxy(resolveTarget)');
     expect(worker).toContain('proxyUrl: pinnedProxy.url');
     expect(worker).toContain('useIncognitoPages: true');

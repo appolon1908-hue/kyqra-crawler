@@ -16,7 +16,9 @@ ALTER TABLE job_requests
   ADD COLUMN caller_id text NOT NULL DEFAULT 'legacy',
   ADD COLUMN action text NOT NULL DEFAULT 'crawl.job.create',
   ADD COLUMN api_version text NOT NULL DEFAULT 'api/v1',
-  ADD COLUMN resource text NOT NULL DEFAULT 'jobs';
+  ADD COLUMN resource text NOT NULL DEFAULT 'jobs',
+  ADD COLUMN enqueue_outcome text NOT NULL DEFAULT 'QUEUED'
+    CHECK (enqueue_outcome IN ('PENDING','QUEUED','FAILED'));
 
 DROP INDEX job_requests_tenant_idempotency;
 CREATE UNIQUE INDEX job_requests_semantic_idempotency ON job_requests
@@ -98,6 +100,7 @@ UPDATE job_requests AS request
   FROM replacements
  WHERE request.job_id=replacements.job_id;
 ALTER TABLE job_requests
+  DROP COLUMN enqueue_outcome,
   DROP COLUMN resource,
   DROP COLUMN api_version,
   DROP COLUMN action,

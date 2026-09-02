@@ -169,7 +169,7 @@ describe('HTTP job submission through real Redis and Postgres', () => {
 
     const enqueueFailure = vi
       .spyOn(runtime.httpCrawlQueue, 'add')
-      .mockRejectedValueOnce(new Error('fixture_enqueue_failure'));
+      .mockRejectedValue(new Error('fixture_enqueue_failure'));
     const failedSubmission = await client
       .post('/api/v1/jobs')
       .set('Authorization', `Bearer ${API_TOKEN}`)
@@ -207,7 +207,32 @@ describe('HTTP job submission through real Redis and Postgres', () => {
       duplicate: true,
       reconciliation_required: true,
     });
-    expect(enqueueFailure).toHaveBeenCalledTimes(1);
+    const failedReconciliation = await client
+      .post(`/api/v1/operations/${String(failedSubmission.body.id)}/reconcile`)
+      .set('Authorization', `Bearer ${API_TOKEN}`)
+      .set('Idempotency-Key', 'fixture-enqueue-reconcile')
+      .set('X-Correlation-Id', 'fixture-enqueue-reconcile');
+    expect(failedReconciliation.status).toBe(500);
+    const stableFailedReplay = await client
+      .post('/api/v1/jobs')
+      .set('Authorization', `Bearer ${API_TOKEN}`)
+      .set('Idempotency-Key', 'fixture-enqueue-failure')
+      .set('X-Correlation-Id', 'fixture-enqueue-failure-correlation')
+      .send({
+        startUrls: [`${fixture.baseUrl}/static`],
+        mode: 'single',
+        maxPages: 1,
+        maxDepth: 0,
+        browser: 'http',
+      });
+    expect(stableFailedReplay.status).toBe(503);
+    expect(stableFailedReplay.body).toMatchObject({
+      id: failedSubmission.body.id,
+      status: 'failed',
+      duplicate: true,
+      reconciliation_required: true,
+    });
+    expect(enqueueFailure).toHaveBeenCalledTimes(2);
     enqueueFailure.mockRestore();
 
     const submission = await client

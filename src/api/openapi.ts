@@ -106,8 +106,9 @@ export const kyqraOpenApi = {
         },
         responses: {
           ...successResponses,
-          '409': { description: 'Idempotency conflict' },
+          '409': { description: 'Idempotency conflict or in-progress reservation' },
           '429': { description: 'Tenant rate limit exceeded' },
+          '503': { description: 'Durable job exists but queue submission failed' },
         },
       },
     },

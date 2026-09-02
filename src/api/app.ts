@@ -15,6 +15,7 @@ import {
   getJobResults,
   getJobStatus,
   markJobFailed,
+  recordJobEnqueueOutcome,
   resetJobQueued,
   type IdempotentJob,
   type JobResultRow,
@@ -70,10 +71,22 @@ const notFound = (reply: FastifyReply): FastifyReply =>
   reply.code(404).send({ error: 'not_found' });
 
 const sendIdempotentJob = (reply: FastifyReply, prior: IdempotentJob): FastifyReply => {
-  if (prior.status === 'failed' && prior.error === 'queue_enqueue_failed') {
+  if (
+    prior.enqueue_outcome === 'FAILED' ||
+    (prior.enqueue_outcome === 'PENDING' && prior.status === 'failed')
+  ) {
     return reply.code(503).send({
       id: prior.job_id,
       status: 'failed',
+      duplicate: true,
+      reconciliation_required: true,
+      correlation_id: prior.correlation_id,
+    });
+  }
+  if (prior.enqueue_outcome === 'PENDING' && prior.status === 'queued') {
+    return reply.code(409).send({
+      id: prior.job_id,
+      status: 'pending',
       duplicate: true,
       reconciliation_required: true,
       correlation_id: prior.correlation_id,
@@ -178,6 +191,7 @@ export const buildApi = async (runtime: Runtime): Promise<FastifyInstance> => {
     try {
       await crawlQueueForSpec(runtime, parsed.data).add('crawl', parsed.data, { jobId });
     } catch {
+      await recordJobEnqueueOutcome(runtime.db, jobId, 'FAILED');
       await markJobFailed(runtime.db, jobId, 'queue_enqueue_failed');
       return reply.code(503).send({
         id: jobId,
@@ -187,6 +201,7 @@ export const buildApi = async (runtime: Runtime): Promise<FastifyInstance> => {
         correlation_id: headers.correlationId,
       });
     }
+    await recordJobEnqueueOutcome(runtime.db, jobId, 'QUEUED');
     return reply.code(202).send({
       id: jobId,
       status: 'queued',
