@@ -88,6 +88,7 @@ describe('HTTP job submission through real Redis and Postgres', () => {
     process.env.REDIS_PORT = String(redis.getPort());
     process.env.KYQRA_SERVICE_PRINCIPALS_FILE = principalPath;
     process.env.MIDDLEWARE_BASE_URL = '';
+    process.env.KYQRA_ALLOW_TEST_TARGETS = 'true';
     process.env.HTTP_CONCURRENCY = '2';
     await migrateDatabase(postgres.getConnectionUri(), 'up');
     runtime = createRuntime();
@@ -238,10 +239,134 @@ describe('HTTP job submission through real Redis and Postgres', () => {
     expect(stats.status).toBe(200);
     expect(stats.body.workers).toEqual({ http: 2, browser: 3 });
 
+    const jobs = await client.get('/v1/jobs').set('Authorization', `Bearer ${API_TOKEN}`);
+    expect(jobs.status).toBe(200);
+    expect(jobs.body.items.some(({ id }: { id: string }) => id === jobId)).toBe(true);
+    const events = await client
+      .get(`/v1/jobs/${jobId}/events`)
+      .set('Authorization', `Bearer ${API_TOKEN}`);
+    expect(events.status).toBe(200);
+    expect(events.body.items.map(({ status }: { status: string }) => status)).toEqual(
+      expect.arrayContaining(['queued', 'running', 'completed']),
+    );
+    const operation = await client
+      .get(`/v1/operations/${jobId}`)
+      .set('Authorization', `Bearer ${API_TOKEN}`);
+    expect(operation.body).toMatchObject({ operation_id: jobId, status: 'SUCCEEDED' });
+    expect(
+      (await client.get('/metrics').set('Authorization', `Bearer ${READONLY_TOKEN}`)).status,
+    ).toBe(403);
+    expect((await client.get('/metrics').set('Authorization', `Bearer ${API_TOKEN}`)).status).toBe(
+      200,
+    );
+    expect((await client.get('/openapi.json')).body.paths['/api/v1/jobs']).toBeDefined();
+
+    expect((await client.get('/health/live')).body).toEqual({ status: 'live' });
+    expect((await client.get('/health/ready')).body).toEqual({
+      status: 'ready',
+      redis: 'ok',
+      postgres: 'ok',
+    });
+    const identity = await client.get('/v1/me').set('Authorization', `Bearer ${API_TOKEN}`);
+    expect(identity.body).toMatchObject({
+      tenant_id: 'fixture-tenant',
+      client_id: 'fixture-client',
+      roles: ['operations'],
+    });
+    expect(
+      (await client.get('/v1/capabilities').set('Authorization', `Bearer ${API_TOKEN}`)).body
+        .capabilities,
+    ).toEqual(['crawl.jobs', 'crawl.results', 'callbacks', 'operations']);
+    expect(
+      (await client.get('/v1/system/readiness').set('Authorization', `Bearer ${API_TOKEN}`)).body,
+    ).toMatchObject({ status: 'ready', redis: 'ok', postgres: 'ok' });
+    expect(
+      (await client.get(`/v1/jobs/${jobId}/results`).set('Authorization', `Bearer ${API_TOKEN}`))
+        .body.count,
+    ).toBe(1);
+    expect(
+      (await client.get('/v1/operations').set('Authorization', `Bearer ${API_TOKEN}`)).body.items,
+    ).toEqual(expect.arrayContaining([expect.objectContaining({ operation_id: jobId })]));
+    expect(
+      (
+        await client
+          .get(`/v1/operations/${jobId}/events`)
+          .set('Authorization', `Bearer ${API_TOKEN}`)
+      ).body.items.length,
+    ).toBeGreaterThan(0);
+    expect(
+      (
+        await client
+          .get(`/v1/operations/${jobId}/attempts`)
+          .set('Authorization', `Bearer ${API_TOKEN}`)
+      ).body.items.length,
+    ).toBeGreaterThan(0);
+
+    const callback = await client
+      .post('/v1/callbacks')
+      .set('Authorization', `Bearer ${API_TOKEN}`)
+      .set('Idempotency-Key', 'callback-create-1')
+      .set('X-Correlation-Id', 'callback-create-1')
+      .send({ url: 'http://10.40.0.1/callback', events: ['job.completed'] });
+    expect(callback.status).toBe(201);
+    const callbackId = String(callback.body.id);
+    expect(
+      (await client.get(`/v1/callbacks/${callbackId}`).set('Authorization', `Bearer ${API_TOKEN}`))
+        .body,
+    ).toMatchObject({ id: callbackId, events: ['job.completed'] });
+    expect(
+      (await client.get('/v1/callbacks').set('Authorization', `Bearer ${API_TOKEN}`)).body.items,
+    ).toEqual(expect.arrayContaining([expect.objectContaining({ id: callbackId })]));
+    const callbackReplay = await client
+      .post('/v1/callbacks')
+      .set('Authorization', `Bearer ${API_TOKEN}`)
+      .set('Idempotency-Key', 'callback-create-1')
+      .set('X-Correlation-Id', 'callback-create-1')
+      .send({ url: 'http://10.40.0.1/callback', events: ['job.completed'] });
+    expect(callbackReplay.status).toBe(201);
+    expect(callbackReplay.body.id).toBe(callbackId);
+
+    const canonicalCancel = await client
+      .post(`/v1/jobs/${jobId}/cancel`)
+      .set('Authorization', `Bearer ${API_TOKEN}`)
+      .set('Idempotency-Key', 'canonical-cancel-1')
+      .set('X-Correlation-Id', 'canonical-cancel-1');
+    expect(canonicalCancel.status).toBe(409);
+    expect(canonicalCancel.body.error).toBe('job_terminal');
+    const reconciled = await client
+      .post(`/v1/operations/${jobId}/reconcile`)
+      .set('Authorization', `Bearer ${API_TOKEN}`)
+      .set('Idempotency-Key', 'canonical-reconcile-1')
+      .set('X-Correlation-Id', 'canonical-reconcile-1');
+    expect(reconciled.status).toBe(200);
+    expect(reconciled.body).toMatchObject({
+      operation_id: jobId,
+      status: 'completed',
+      reconciliation_required: false,
+    });
+
     const cancelled = await client
       .post(`/api/v1/jobs/${jobId}/cancel`)
-      .set('Authorization', `Bearer ${API_TOKEN}`);
-    expect(cancelled.body).toEqual({ id: jobId, status: 'cancelled' });
+      .set('Authorization', `Bearer ${API_TOKEN}`)
+      .set('Idempotency-Key', 'terminal-cancel-1')
+      .set('X-Correlation-Id', 'terminal-cancel-1');
+    expect(cancelled.status).toBe(409);
+    expect(cancelled.body).toEqual({ id: jobId, error: 'job_terminal' });
+    const cancelledReplay = await client
+      .post(`/api/v1/jobs/${jobId}/cancel`)
+      .set('Authorization', `Bearer ${API_TOKEN}`)
+      .set('Idempotency-Key', 'terminal-cancel-1')
+      .set('X-Correlation-Id', 'terminal-cancel-1');
+    expect(cancelledReplay.status).toBe(409);
+    expect(cancelledReplay.body).toEqual(cancelled.body);
+
+    const completedRetry = await client
+      .post(`/api/v1/jobs/${jobId}/retry`)
+      .set('Authorization', `Bearer ${API_TOKEN}`)
+      .set('Idempotency-Key', 'terminal-cancel-1')
+      .set('X-Correlation-Id', 'terminal-retry-1');
+    expect(completedRetry.status).toBe(409);
+    expect(completedRetry.body.error).toBe('job_not_retryable');
 
     for (const endpoint of [
       `/api/v1/jobs/${crypto.randomUUID()}`,

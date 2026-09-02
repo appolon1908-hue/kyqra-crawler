@@ -5,6 +5,7 @@ export KYQRA_IMAGE='ghcr.io/appolon1908-hue/kyqra-crawler@sha256:aaaaaaaaaaaaaaa
 export POSTGRES_PASSWORD='fixture-only-not-a-production-secret'
 export KYQRA_ENV_FILE='test/fixtures.env'
 export KYQRA_SERVICE_PRINCIPALS_FILE='test/fixtures-service-principals.json'
+export KYQRA_REDIS_PASSWORD_FILE='/tmp/kyqra-ci-redis-password'
 export KYQRA_SECRETS_GID='65534'
 docker compose -f docker-compose.yml config --quiet
 rendered=$(docker compose -f docker-compose.yml config)

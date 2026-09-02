@@ -10,7 +10,7 @@ const POSTGRES_IMAGE =
   'postgres:17-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73';
 
 const legacyTables = ['job_requests', 'jobs', 'results'];
-const targetTables = [
+const targetV2Tables = [
   'audit_log',
   'credentials',
   'dead_letters',
@@ -28,6 +28,12 @@ const targetTables = [
   'sessions',
   'tenants',
 ];
+const targetTables = [
+  ...targetV2Tables,
+  'callback_configs',
+  'command_requests',
+  'job_events',
+].sort();
 
 describe('PostgreSQL migrations', () => {
   let postgres: StartedPostgreSqlContainer;
@@ -88,10 +94,16 @@ describe('PostgreSQL migrations', () => {
 
     await migrateDatabase(databaseUrl, 'up', 1);
     await migrateDatabase(databaseUrl, 'up', 1);
-    expect(await applicationTables()).toEqual(targetTables);
+    expect(await applicationTables()).toEqual(targetV2Tables);
     expect(await jobColumns()).toEqual(
       expect.arrayContaining(['budget', 'finished_at', 'spec', 'started_at', 'tenant_id']),
     );
+
+    await migrateDatabase(databaseUrl, 'up', 1);
+    expect(await applicationTables()).toEqual(targetTables);
+
+    await migrateDatabase(databaseUrl, 'down', 1);
+    expect(await applicationTables()).toEqual(targetV2Tables);
 
     await migrateDatabase(databaseUrl, 'down', 1);
     expect(await applicationTables()).toEqual(legacyTables);
@@ -104,7 +116,7 @@ describe('PostgreSQL migrations', () => {
     await migrateDatabase(databaseUrl, 'up');
     expect(await applicationTables()).toEqual(targetTables);
 
-    await migrateDatabase(databaseUrl, 'down', 1);
+    await migrateDatabase(databaseUrl, 'down', 2);
     const legacyJobId = '00000000-0000-4000-8000-000000000002';
     await db.query("insert into jobs(id,status,payload) values($1,'queued',$2)", [
       legacyJobId,

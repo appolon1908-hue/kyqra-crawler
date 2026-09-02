@@ -5,7 +5,11 @@ import { PlaywrightCrawler } from '@crawlee/playwright';
 
 import { browserConcurrency, httpConcurrency, jobConcurrency } from '../config/env.js';
 import { jobSpecSchema, type JobSpec } from '../config/schema.js';
-import { isCallbackAllowed } from '../delivery/security.js';
+import {
+  createCrawlTargetGuard,
+  createPinnedCrawlLookup,
+  isCallbackAllowed,
+} from '../delivery/security.js';
 import { extractGenericData } from '../extract/generic.js';
 import { canonicalizeUrl, urlHash } from '../frontier/canonicalize.js';
 import { log } from '../observability/logger.js';
@@ -31,6 +35,15 @@ interface PageRequestData {
 
 const errorMessage = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
+
+const safeLogUrl = (rawUrl: string): string => {
+  try {
+    const url = new URL(rawUrl);
+    return `${url.protocol}//${url.host}${url.pathname}`;
+  } catch {
+    return 'invalid-url';
+  }
+};
 
 const requestDepth = (request: Request): number => {
   const data = request.userData as PageRequestData;
@@ -67,7 +80,9 @@ const processPage = async (
   request: Request,
   html: string,
   progress: CrawlProgress,
+  guardTarget: (rawUrl: string) => Promise<void>,
 ): Promise<void> => {
+  await guardTarget(request.loadedUrl || request.url);
   progress.processed += 1;
   const sourceUrl = request.loadedUrl || request.url;
   const data = extractGenericData(html, sourceUrl);
@@ -94,39 +109,51 @@ const queueCompletionCallbacks = async (
   if (middlewareBaseUrl) {
     const rows = await listResultsForCallbacks(runtime.db, jobId);
     for (const row of rows) {
-      await runtime.callbackQueue.add('result', {
+      await runtime.callbackQueue.add(
+        'result',
+        {
+          jobId,
+          url: `${middlewareBaseUrl}/api/v1/kyqra/results`,
+          payload: {
+            job_id: jobId,
+            tenant_id: metadata?.tenant_id ?? null,
+            correlation_id: metadata?.correlation_id ?? null,
+            record_id: row.id,
+            ...row.data,
+            category: row.data.category ?? null,
+            confidence: row.data.confidence ?? null,
+            provenance: row.provenance,
+          },
+        },
+        { jobId: `kyqra-result-${jobId}-${row.id}` },
+      );
+    }
+    await runtime.callbackQueue.add(
+      'progress',
+      {
         jobId,
-        url: `${middlewareBaseUrl}/api/v1/kyqra/results`,
+        url: `${middlewareBaseUrl}/api/v1/kyqra/progress`,
         payload: {
           job_id: jobId,
           tenant_id: metadata?.tenant_id ?? null,
           correlation_id: metadata?.correlation_id ?? null,
-          record_id: row.id,
-          ...row.data,
-          category: row.data.category ?? null,
-          confidence: row.data.confidence ?? null,
-          provenance: row.provenance,
+          status: 'completed',
+          ...progress,
         },
-      });
-    }
-    await runtime.callbackQueue.add('progress', {
-      jobId,
-      url: `${middlewareBaseUrl}/api/v1/kyqra/progress`,
-      payload: {
-        job_id: jobId,
-        tenant_id: metadata?.tenant_id ?? null,
-        correlation_id: metadata?.correlation_id ?? null,
-        status: 'completed',
-        ...progress,
       },
-    });
+      { jobId: `kyqra-progress-${jobId}` },
+    );
   }
   if (spec.callbackUrl && isCallbackAllowed(spec.callbackUrl)) {
-    await runtime.callbackQueue.add('complete', {
-      jobId,
-      url: spec.callbackUrl,
-      payload: { job_id: jobId, status: 'completed', ...progress },
-    });
+    await runtime.callbackQueue.add(
+      'complete',
+      {
+        jobId,
+        url: spec.callbackUrl,
+        payload: { job_id: jobId, status: 'completed', ...progress },
+      },
+      { jobId: `kyqra-complete-${jobId}` },
+    );
   }
 };
 
@@ -138,6 +165,9 @@ export const processCrawlJob = async (
   const jobId = job.id;
   if (!jobId) throw new Error('job_id_required');
   const progress: CrawlProgress = { processed: 0, records: 0, failed: 0 };
+  const guardTarget = createCrawlTargetGuard();
+  const routedPages = new WeakSet<object>();
+  await Promise.all(spec.startUrls.map((url) => guardTarget(url)));
   await markJobRunning(runtime.db, jobId);
   const roots = spec.startUrls.map((url) => new URL(url).hostname);
   const requestQueue = await RequestQueue.open(`job-${jobId}`);
@@ -154,7 +184,7 @@ export const processCrawlJob = async (
     sameDomainDelaySecs: 1 / spec.requestsPerSecond,
     failedRequestHandler: async ({ request }: { request: Request }) => {
       progress.failed += 1;
-      log('warn', 'request_failed', { jobId, url: request.url });
+      log('warn', 'request_failed', { jobId, url: safeLogUrl(request.url) });
     },
   };
 
@@ -162,13 +192,33 @@ export const processCrawlJob = async (
     if (useBrowser) {
       await new PlaywrightCrawler({
         ...commonOptions,
+        preNavigationHooks: [
+          async ({ request, page }) => {
+            await guardTarget(request.url);
+            if (routedPages.has(page)) return;
+            routedPages.add(page);
+            await page.route('**/*', async (route) => {
+              const target = route.request().url();
+              const protocol = new URL(target).protocol;
+              if (protocol === 'data:' || protocol === 'blob:' || protocol === 'about:') {
+                return route.continue();
+              }
+              try {
+                await guardTarget(target);
+                return route.continue();
+              } catch {
+                return route.abort('blockedbyclient');
+              }
+            });
+          },
+        ],
         launchContext: {
           launchOptions: { headless: true, args: ['--disable-dev-shm-usage'] },
         },
         requestHandler: async (context) => {
           const depth = requestDepth(context.request);
           const html = await context.page.content();
-          await processPage(runtime, job, jobId, context.request, html, progress);
+          await processPage(runtime, job, jobId, context.request, html, progress, guardTarget);
           if (depth < spec.maxDepth && spec.mode !== 'single') {
             await context.enqueueLinks({
               strategy: 'same-hostname',
@@ -181,12 +231,19 @@ export const processCrawlJob = async (
     } else {
       await new CheerioCrawler({
         ...commonOptions,
+        preNavigationHooks: [
+          async ({ request }, gotOptions) => {
+            await guardTarget(request.url);
+            gotOptions.dnsLookup = await createPinnedCrawlLookup(request.url);
+            gotOptions.maxRedirects = 5;
+          },
+        ],
         requestHandler: async (context) => {
           const depth = requestDepth(context.request);
           const html = Buffer.isBuffer(context.body)
             ? context.body.toString('utf8')
             : String(context.body);
-          await processPage(runtime, job, jobId, context.request, html, progress);
+          await processPage(runtime, job, jobId, context.request, html, progress, guardTarget);
           if (depth < spec.maxDepth && spec.mode !== 'single') {
             await context.enqueueLinks({
               strategy: 'same-hostname',

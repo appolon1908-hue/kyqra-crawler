@@ -155,7 +155,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-      - run: docker build --pull=false --tag kyqra-ci:${{ github.sha }} .
+      - run: docker build --pull=false --build-arg SOURCE_COMMIT_SHA=${{ github.sha }} --tag kyqra-ci:${{ github.sha }} .
       - run: docker inspect --format '{{.Id}}' kyqra-ci:${{ github.sha }} | tee image-digest.txt
       - uses: anchore/sbom-action@f8bdd1d8ac5e901a77a92f111440fdb1b593736b
         with:
