@@ -4,7 +4,10 @@ import { jobSpecSchema } from '../../src/config/schema.js';
 import { dashboardHtml } from '../../src/api/dashboard.js';
 import {
   browserConcurrency,
+  crawlWorkerKind,
+  databaseUrl,
   httpConcurrency,
+  integrationCredentials,
   jobConcurrency,
   redisConnectionOptions,
 } from '../../src/config/env.js';
@@ -78,6 +81,8 @@ describe('crawler core behavior', () => {
   });
 
   it('parses environment concurrency and Redis settings with safe defaults', () => {
+    delete process.env.REDIS_PASSWORD_FILE;
+    delete process.env.REDIS_PASSWORD;
     process.env.REDIS_HOST = 'fixture-redis';
     process.env.REDIS_PORT = '6380';
     process.env.HTTP_CONCURRENCY = '4';
@@ -87,5 +92,45 @@ describe('crawler core behavior', () => {
     expect(httpConcurrency()).toBe(4);
     expect(browserConcurrency()).toBe(2);
     expect(jobConcurrency()).toBe(2);
+    process.env.WORKER_KIND = 'http';
+    expect(crawlWorkerKind()).toBe('http');
+    process.env.WORKER_KIND = 'invalid';
+    expect(() => crawlWorkerKind()).toThrow('WORKER_KIND');
+    delete process.env.WORKER_KIND;
+  });
+
+  it('rejects Redis credentials that cannot be represented safely in an ACL', () => {
+    delete process.env.REDIS_PASSWORD_FILE;
+    process.env.REDIS_PASSWORD = 'contains spaces and shell metacharacters!';
+    expect(() => redisConnectionOptions()).toThrow('URL-safe token');
+    process.env.REDIS_PASSWORD = 'a'.repeat(32);
+    expect(redisConnectionOptions()).toMatchObject({ password: 'a'.repeat(32) });
+    delete process.env.REDIS_PASSWORD;
+  });
+
+  it('requires non-empty callback credentials and prevents conflicting secret sources', () => {
+    delete process.env.KYQRA_MIDDLEWARE_API_KEY_FILE;
+    delete process.env.KYQRA_WEBHOOK_SECRET_FILE;
+    process.env.KYQRA_MIDDLEWARE_API_KEY = 'm'.repeat(32);
+    process.env.KYQRA_WEBHOOK_SECRET = 'w'.repeat(32);
+    expect(integrationCredentials()).toEqual({
+      middlewareApiKey: 'm'.repeat(32),
+      webhookSecret: 'w'.repeat(32),
+    });
+    process.env.KYQRA_WEBHOOK_SECRET_FILE = '/does/not/matter';
+    expect(() => integrationCredentials()).toThrow('configure only');
+    delete process.env.KYQRA_MIDDLEWARE_API_KEY;
+    delete process.env.KYQRA_WEBHOOK_SECRET;
+    delete process.env.KYQRA_WEBHOOK_SECRET_FILE;
+  });
+
+  it('supports file-backed database credentials without requiring an environment secret', () => {
+    process.env.DATABASE_URL = 'postgresql://fixture.invalid/crawler';
+    delete process.env.DATABASE_PASSWORD_FILE;
+    expect(databaseUrl()).toBe('postgresql://fixture.invalid/crawler');
+    process.env.DATABASE_PASSWORD_FILE = '/does/not/matter';
+    expect(() => databaseUrl()).toThrow('configure only');
+    delete process.env.DATABASE_URL;
+    delete process.env.DATABASE_PASSWORD_FILE;
   });
 });

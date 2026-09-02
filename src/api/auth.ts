@@ -13,8 +13,13 @@ const isServicePrincipal = (value: unknown): value is ServicePrincipal => {
   const item = value as Record<string, unknown>;
   return (
     typeof item.key_sha256 === 'string' &&
+    /^[0-9a-f]{64}$/.test(item.key_sha256) &&
     typeof item.tenant_id === 'string' &&
+    item.tenant_id.length >= 1 &&
+    item.tenant_id.length <= 128 &&
     typeof item.client_id === 'string' &&
+    item.client_id.length >= 1 &&
+    item.client_id.length <= 128 &&
     typeof item.enabled === 'boolean' &&
     (item.roles === undefined || isStringArray(item.roles))
   );
@@ -34,7 +39,9 @@ export const authenticate = (
   reply: FastifyReply,
   done: HookHandlerDoneFunction,
 ): void => {
-  const token = String(request.headers.authorization || '').replace(/^Bearer /, '');
+  const authorization = String(request.headers.authorization || '');
+  const bearer = /^Bearer ([^\s]{16,512})$/i.exec(authorization);
+  const token = bearer?.[1] || '';
   const digest = crypto.createHash('sha256').update(token).digest('hex');
   const matches = loadServicePrincipals().filter(
     (principal) =>

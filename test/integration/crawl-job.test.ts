@@ -61,6 +61,7 @@ describe('HTTP job submission through real Redis and Postgres', () => {
       startFixtureSite(),
     ]);
     fixtureDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'kyqra-m1-'));
+    process.env.CRAWLEE_STORAGE_DIR = path.join(fixtureDirectory, 'crawlee-storage');
     const principalPath = path.join(fixtureDirectory, 'principals.json');
     fs.writeFileSync(
       principalPath,
@@ -88,12 +89,13 @@ describe('HTTP job submission through real Redis and Postgres', () => {
     process.env.REDIS_PORT = String(redis.getPort());
     process.env.KYQRA_SERVICE_PRINCIPALS_FILE = principalPath;
     process.env.MIDDLEWARE_BASE_URL = '';
+    process.env.KYQRA_ALLOW_TEST_TARGETS = 'true';
     process.env.HTTP_CONCURRENCY = '2';
     await migrateDatabase(postgres.getConnectionUri(), 'up');
     runtime = createRuntime();
     app = await buildApi(runtime);
     await app.ready();
-    crawlWorker = createCrawlWorker(runtime);
+    crawlWorker = createCrawlWorker(runtime, 'http');
     await crawlWorker.waitUntilReady();
     client = request(app.server);
   });
@@ -116,6 +118,10 @@ describe('HTTP job submission through real Redis and Postgres', () => {
       postgres: 'ok',
     });
     expect((await client.get('/api/v1/stats')).status).toBe(401);
+    expect((await client.get('/api/v1/stats').set('Authorization', API_TOKEN)).status).toBe(401);
+    expect(
+      (await client.get('/api/v1/me').set('Authorization', `bearer ${API_TOKEN}`)).status,
+    ).toBe(200);
     expect(
       (await client.get('/api/v1/stats').set('Authorization', `Bearer ${READONLY_TOKEN}`)).status,
     ).toBe(403);
@@ -238,10 +244,99 @@ describe('HTTP job submission through real Redis and Postgres', () => {
     expect(stats.status).toBe(200);
     expect(stats.body.workers).toEqual({ http: 2, browser: 3 });
 
+    const jobs = await client.get('/api/v1/jobs').set('Authorization', `Bearer ${API_TOKEN}`);
+    expect(jobs.status).toBe(200);
+    expect(jobs.body.items.some(({ id }: { id: string }) => id === jobId)).toBe(true);
+    const events = await client
+      .get(`/api/v1/jobs/${jobId}/events`)
+      .set('Authorization', `Bearer ${API_TOKEN}`);
+    expect(events.status).toBe(200);
+    expect(events.body.items.map(({ status }: { status: string }) => status)).toEqual(
+      expect.arrayContaining(['queued', 'running', 'completed']),
+    );
+    const operation = await client
+      .get(`/api/v1/operations/${jobId}`)
+      .set('Authorization', `Bearer ${API_TOKEN}`);
+    expect(operation.body).toMatchObject({ operation_id: jobId, status: 'SUCCEEDED' });
+    expect(
+      (await client.get('/metrics').set('Authorization', `Bearer ${READONLY_TOKEN}`)).status,
+    ).toBe(403);
+    expect((await client.get('/metrics').set('Authorization', `Bearer ${API_TOKEN}`)).status).toBe(
+      200,
+    );
+    expect((await client.get('/openapi.json')).body.paths['/api/v1/jobs']).toBeDefined();
+
     const cancelled = await client
       .post(`/api/v1/jobs/${jobId}/cancel`)
+      .set('Authorization', `Bearer ${API_TOKEN}`)
+      .set('Idempotency-Key', 'terminal-cancel-1')
+      .set('X-Correlation-Id', 'terminal-cancel-1');
+    expect(cancelled.status).toBe(409);
+    expect(cancelled.body).toEqual({ id: jobId, error: 'job_terminal' });
+    const cancelledReplay = await client
+      .post(`/api/v1/jobs/${jobId}/cancel`)
+      .set('Authorization', `Bearer ${API_TOKEN}`)
+      .set('Idempotency-Key', 'terminal-cancel-1')
+      .set('X-Correlation-Id', 'terminal-cancel-1');
+    expect(cancelledReplay.status).toBe(409);
+    expect(cancelledReplay.body).toEqual(cancelled.body);
+
+    const completedRetry = await client
+      .post(`/api/v1/jobs/${jobId}/retry`)
+      .set('Authorization', `Bearer ${API_TOKEN}`)
+      .set('Idempotency-Key', 'terminal-cancel-1')
+      .set('X-Correlation-Id', 'terminal-retry-1');
+    expect(completedRetry.status).toBe(409);
+    expect(completedRetry.body.error).toBe('job_not_retryable');
+
+    const slowSubmission = await client
+      .post('/api/v1/jobs')
+      .set('Authorization', `Bearer ${API_TOKEN}`)
+      .set('Idempotency-Key', 'slow-111')
+      .set('X-Correlation-Id', 'fixture-slow-cancel-1')
+      .send({
+        startUrls: [`${fixture.baseUrl}/slow`],
+        mode: 'single',
+        maxPages: 1,
+        maxDepth: 0,
+        browser: 'http',
+      });
+    expect(slowSubmission.status).toBe(202);
+    const slowJobId = String(slowSubmission.body.id);
+    const cancelSlow = await client
+      .post(`/api/v1/jobs/${slowJobId}/cancel`)
+      .set('Authorization', `Bearer ${API_TOKEN}`)
+      .set('Idempotency-Key', 'fixture-slow-cancel-command-1')
+      .set('X-Correlation-Id', 'fixture-slow-cancel-command-1');
+    expect(cancelSlow.status).toBe(200);
+    expect(cancelSlow.body).toEqual({ id: slowJobId, status: 'cancelled' });
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    const cancelledStatus = await client
+      .get(`/api/v1/jobs/${slowJobId}`)
       .set('Authorization', `Bearer ${API_TOKEN}`);
-    expect(cancelled.body).toEqual({ id: jobId, status: 'cancelled' });
+    expect(cancelledStatus.body.status).toBe('cancelled');
+    const cancelledResults = await client
+      .get(`/api/v1/jobs/${slowJobId}/results`)
+      .set('Authorization', `Bearer ${API_TOKEN}`);
+    expect(cancelledResults.body.count).toBe(0);
+    const cancelledEvents = await client
+      .get(`/api/v1/jobs/${slowJobId}/events`)
+      .set('Authorization', `Bearer ${API_TOKEN}`);
+    expect(
+      cancelledEvents.body.items.map(({ status }: { status: string }) => status),
+    ).not.toContain('completed');
+
+    const retryCancelled = await client
+      .post(`/api/v1/jobs/${slowJobId}/retry`)
+      .set('Authorization', `Bearer ${API_TOKEN}`)
+      .set('Idempotency-Key', 'fixture-slow-retry-command-1')
+      .set('X-Correlation-Id', 'fixture-slow-retry-command-1');
+    expect(retryCancelled.status).toBe(202);
+    await waitForCompleted(client, slowJobId);
+    const retriedResults = await client
+      .get(`/api/v1/jobs/${slowJobId}/results`)
+      .set('Authorization', `Bearer ${API_TOKEN}`);
+    expect(retriedResults.body.count).toBe(1);
 
     for (const endpoint of [
       `/api/v1/jobs/${crypto.randomUUID()}`,

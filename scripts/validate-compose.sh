@@ -2,9 +2,12 @@
 set -euo pipefail
 
 export KYQRA_IMAGE='ghcr.io/appolon1908-hue/kyqra-crawler@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-export POSTGRES_PASSWORD='fixture-only-not-a-production-secret'
 export KYQRA_ENV_FILE='test/fixtures.env'
 export KYQRA_SERVICE_PRINCIPALS_FILE='test/fixtures-service-principals.json'
+export KYQRA_REDIS_PASSWORD_FILE='/tmp/kyqra-ci-redis-password'
+export KYQRA_POSTGRES_PASSWORD_FILE='/tmp/kyqra-ci-postgres-password'
+export KYQRA_MIDDLEWARE_API_KEY_FILE='/tmp/kyqra-ci-middleware-api-key'
+export KYQRA_WEBHOOK_SECRET_FILE='/tmp/kyqra-ci-webhook-secret'
 export KYQRA_SECRETS_GID='65534'
 docker compose -f docker-compose.yml config --quiet
 rendered=$(docker compose -f docker-compose.yml config)

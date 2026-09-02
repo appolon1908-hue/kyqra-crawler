@@ -4,6 +4,8 @@ import { fileURLToPath } from 'node:url';
 import { runner } from 'node-pg-migrate';
 import pg from 'pg';
 
+import { databaseUrl } from '../../config/env.js';
+
 export type MigrationDirection = 'up' | 'down';
 
 const migrationDirectory = path.resolve(
@@ -56,14 +58,13 @@ const parseCount = (value: string | undefined, direction: MigrationDirection): n
 };
 
 const runCommand = async (): Promise<void> => {
-  const databaseUrl = process.env.DATABASE_URL;
-  if (!databaseUrl) throw new Error('DATABASE_URL is required');
+  const connectionUrl = databaseUrl();
   const directionArgument = process.argv[2] ?? 'up';
   if (directionArgument !== 'up' && directionArgument !== 'down') {
     throw new Error('migration_direction_must_be_up_or_down');
   }
   await migrateDatabase(
-    databaseUrl,
+    connectionUrl,
     directionArgument,
     parseCount(process.argv[3], directionArgument),
   );

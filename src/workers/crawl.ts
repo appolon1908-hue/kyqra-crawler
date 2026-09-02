@@ -1,23 +1,36 @@
 import { Job, Worker } from 'bullmq';
 import { CheerioCrawler } from '@crawlee/cheerio';
-import { RequestQueue, type Request, type RequestOptions } from '@crawlee/core';
+import {
+  Configuration,
+  NonRetryableError,
+  RequestQueue,
+  type Request,
+  type RequestOptions,
+} from '@crawlee/core';
 import { PlaywrightCrawler } from '@crawlee/playwright';
 
 import { browserConcurrency, httpConcurrency, jobConcurrency } from '../config/env.js';
 import { jobSpecSchema, type JobSpec } from '../config/schema.js';
-import { isCallbackAllowed } from '../delivery/security.js';
+import {
+  createCrawlTargetGuard,
+  createPinnedCrawlLookup,
+  isCallbackAllowed,
+  validateCrawlRedirectTarget,
+} from '../delivery/security.js';
 import { extractGenericData } from '../extract/generic.js';
 import { canonicalizeUrl, urlHash } from '../frontier/canonicalize.js';
 import { log } from '../observability/logger.js';
+import { crawlQueueForKind } from '../queues/crawl.js';
 import {
   getJobMetadata,
+  getInternalJobStatus,
   insertResult,
   listResultsForCallbacks,
   markJobCompleted,
   markJobFailed,
   markJobRunning,
 } from '../storage/postgres/repository.js';
-import type { Runtime } from '../types.js';
+import type { CrawlWorkerKind, Runtime } from '../types.js';
 
 interface CrawlProgress {
   processed: number;
@@ -31,6 +44,15 @@ interface PageRequestData {
 
 const errorMessage = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
+
+const safeLogUrl = (rawUrl: string): string => {
+  try {
+    const url = new URL(rawUrl);
+    return `${url.protocol}//${url.host}${url.pathname}`;
+  } catch {
+    return 'invalid-url';
+  }
+};
 
 const requestDepth = (request: Request): number => {
   const data = request.userData as PageRequestData;
@@ -67,7 +89,13 @@ const processPage = async (
   request: Request,
   html: string,
   progress: CrawlProgress,
+  guardTarget: (rawUrl: string) => Promise<void>,
 ): Promise<void> => {
+  if ((await getInternalJobStatus(runtime.db, jobId)) !== 'running') {
+    job.discard();
+    throw new NonRetryableError('job_no_longer_running');
+  }
+  await guardTarget(request.loadedUrl || request.url);
   progress.processed += 1;
   const sourceUrl = request.loadedUrl || request.url;
   const data = extractGenericData(html, sourceUrl);
@@ -94,39 +122,51 @@ const queueCompletionCallbacks = async (
   if (middlewareBaseUrl) {
     const rows = await listResultsForCallbacks(runtime.db, jobId);
     for (const row of rows) {
-      await runtime.callbackQueue.add('result', {
+      await runtime.callbackQueue.add(
+        'result',
+        {
+          jobId,
+          url: `${middlewareBaseUrl}/api/v1/kyqra/results`,
+          payload: {
+            job_id: jobId,
+            tenant_id: metadata?.tenant_id ?? null,
+            correlation_id: metadata?.correlation_id ?? null,
+            record_id: row.id,
+            ...row.data,
+            category: row.data.category ?? null,
+            confidence: row.data.confidence ?? null,
+            provenance: row.provenance,
+          },
+        },
+        { jobId: `kyqra-result-${jobId}-${row.id}` },
+      );
+    }
+    await runtime.callbackQueue.add(
+      'progress',
+      {
         jobId,
-        url: `${middlewareBaseUrl}/api/v1/kyqra/results`,
+        url: `${middlewareBaseUrl}/api/v1/kyqra/progress`,
         payload: {
           job_id: jobId,
           tenant_id: metadata?.tenant_id ?? null,
           correlation_id: metadata?.correlation_id ?? null,
-          record_id: row.id,
-          ...row.data,
-          category: row.data.category ?? null,
-          confidence: row.data.confidence ?? null,
-          provenance: row.provenance,
+          status: 'completed',
+          ...progress,
         },
-      });
-    }
-    await runtime.callbackQueue.add('progress', {
-      jobId,
-      url: `${middlewareBaseUrl}/api/v1/kyqra/progress`,
-      payload: {
-        job_id: jobId,
-        tenant_id: metadata?.tenant_id ?? null,
-        correlation_id: metadata?.correlation_id ?? null,
-        status: 'completed',
-        ...progress,
       },
-    });
+      { jobId: `kyqra-progress-${jobId}` },
+    );
   }
   if (spec.callbackUrl && isCallbackAllowed(spec.callbackUrl)) {
-    await runtime.callbackQueue.add('complete', {
-      jobId,
-      url: spec.callbackUrl,
-      payload: { job_id: jobId, status: 'completed', ...progress },
-    });
+    await runtime.callbackQueue.add(
+      'complete',
+      {
+        jobId,
+        url: spec.callbackUrl,
+        payload: { job_id: jobId, status: 'completed', ...progress },
+      },
+      { jobId: `kyqra-complete-${jobId}` },
+    );
   }
 };
 
@@ -138,9 +178,23 @@ export const processCrawlJob = async (
   const jobId = job.id;
   if (!jobId) throw new Error('job_id_required');
   const progress: CrawlProgress = { processed: 0, records: 0, failed: 0 };
-  await markJobRunning(runtime.db, jobId);
+  const guardTarget = createCrawlTargetGuard();
+  const routedPages = new WeakSet<object>();
+  await Promise.all(spec.startUrls.map((url) => guardTarget(url)));
+  if (!(await markJobRunning(runtime.db, jobId))) {
+    job.discard();
+    throw new NonRetryableError('job_not_runnable');
+  }
   const roots = spec.startUrls.map((url) => new URL(url).hostname);
-  const requestQueue = await RequestQueue.open(`job-${jobId}`);
+  // The frontier is populated before crawler.run(). Crawlee purges local storage on the
+  // first run by default, which would erase this named queue and incorrectly complete a
+  // job with zero processed requests. A job-scoped configuration preserves its frontier
+  // while retaining isolation from every other concurrently running job.
+  const crawlConfiguration = new Configuration({ purgeOnStart: false, persistStorage: true });
+  const requestQueue = await RequestQueue.open(
+    `job-${jobId}-${job.timestamp}-${job.attemptsMade}`,
+    { config: crawlConfiguration },
+  );
   for (const url of spec.startUrls) {
     await requestQueue.addRequest({ url: canonicalizeUrl(url), userData: { depth: 0 } });
   }
@@ -154,60 +208,118 @@ export const processCrawlJob = async (
     sameDomainDelaySecs: 1 / spec.requestsPerSecond,
     failedRequestHandler: async ({ request }: { request: Request }) => {
       progress.failed += 1;
-      log('warn', 'request_failed', { jobId, url: request.url });
+      log('warn', 'request_failed', { jobId, url: safeLogUrl(request.url) });
     },
   };
 
   try {
     if (useBrowser) {
-      await new PlaywrightCrawler({
-        ...commonOptions,
-        launchContext: {
-          launchOptions: { headless: true, args: ['--disable-dev-shm-usage'] },
+      await new PlaywrightCrawler(
+        {
+          ...commonOptions,
+          preNavigationHooks: [
+            async ({ request, page }) => {
+              if ((await getInternalJobStatus(runtime.db, jobId)) !== 'running') {
+                job.discard();
+                throw new NonRetryableError('job_no_longer_running');
+              }
+              await guardTarget(request.url);
+              if (routedPages.has(page)) return;
+              routedPages.add(page);
+              await page.route('**/*', async (route) => {
+                const target = route.request().url();
+                const protocol = new URL(target).protocol;
+                if (protocol === 'data:' || protocol === 'blob:' || protocol === 'about:') {
+                  return route.continue();
+                }
+                try {
+                  await guardTarget(target);
+                  return route.continue();
+                } catch {
+                  return route.abort('blockedbyclient');
+                }
+              });
+            },
+          ],
+          launchContext: {
+            launchOptions: { headless: true, args: ['--disable-dev-shm-usage'] },
+          },
+          requestHandler: async (context) => {
+            const depth = requestDepth(context.request);
+            const html = await context.page.content();
+            await processPage(runtime, job, jobId, context.request, html, progress, guardTarget);
+            if (depth < spec.maxDepth && spec.mode !== 'single') {
+              await context.enqueueLinks({
+                strategy: 'same-hostname',
+                transformRequestFunction: (request) =>
+                  transformDiscoveredRequest(request, roots, spec, depth),
+              });
+            }
+          },
         },
-        requestHandler: async (context) => {
-          const depth = requestDepth(context.request);
-          const html = await context.page.content();
-          await processPage(runtime, job, jobId, context.request, html, progress);
-          if (depth < spec.maxDepth && spec.mode !== 'single') {
-            await context.enqueueLinks({
-              strategy: 'same-hostname',
-              transformRequestFunction: (request) =>
-                transformDiscoveredRequest(request, roots, spec, depth),
-            });
-          }
-        },
-      }).run();
+        crawlConfiguration,
+      ).run();
     } else {
-      await new CheerioCrawler({
-        ...commonOptions,
-        requestHandler: async (context) => {
-          const depth = requestDepth(context.request);
-          const html = Buffer.isBuffer(context.body)
-            ? context.body.toString('utf8')
-            : String(context.body);
-          await processPage(runtime, job, jobId, context.request, html, progress);
-          if (depth < spec.maxDepth && spec.mode !== 'single') {
-            await context.enqueueLinks({
-              strategy: 'same-hostname',
-              transformRequestFunction: (request) =>
-                transformDiscoveredRequest(request, roots, spec, depth),
-            });
-          }
+      await new CheerioCrawler(
+        {
+          ...commonOptions,
+          preNavigationHooks: [
+            async ({ request }, gotOptions) => {
+              if ((await getInternalJobStatus(runtime.db, jobId)) !== 'running') {
+                job.discard();
+                throw new NonRetryableError('job_no_longer_running');
+              }
+              await guardTarget(request.url);
+              gotOptions.dnsLookup = await createPinnedCrawlLookup(request.url);
+              gotOptions.maxRedirects = 5;
+              gotOptions.followRedirect = (response) => {
+                const location = response.headers.location;
+                if (!location) return false;
+                validateCrawlRedirectTarget(location, response.url);
+                return true;
+              };
+            },
+          ],
+          requestHandler: async (context) => {
+            const depth = requestDepth(context.request);
+            const html = Buffer.isBuffer(context.body)
+              ? context.body.toString('utf8')
+              : String(context.body);
+            await processPage(runtime, job, jobId, context.request, html, progress, guardTarget);
+            if (depth < spec.maxDepth && spec.mode !== 'single') {
+              await context.enqueueLinks({
+                strategy: 'same-hostname',
+                transformRequestFunction: (request) =>
+                  transformDiscoveredRequest(request, roots, spec, depth),
+              });
+            }
+          },
         },
-      }).run();
+        crawlConfiguration,
+      ).run();
     }
-    await markJobCompleted(runtime.db, jobId, progress);
+    if (!(await markJobCompleted(runtime.db, jobId, progress))) {
+      job.discard();
+      throw new NonRetryableError('job_no_longer_running');
+    }
     await queueCompletionCallbacks(runtime, jobId, spec, progress);
     return progress;
   } catch (error: unknown) {
     await markJobFailed(runtime.db, jobId, errorMessage(error));
     throw error;
+  } finally {
+    await requestQueue.drop().catch((error: unknown) => {
+      log('warn', 'request_queue_cleanup_failed', { jobId, error: errorMessage(error) });
+    });
   }
 };
 
-export const createCrawlWorker = (runtime: Runtime): Worker<JobSpec> =>
-  new Worker<JobSpec>('crawl', (job) => processCrawlJob(runtime, job), {
-    connection: runtime.redisConnection,
-    concurrency: jobConcurrency(),
-  });
+export const createCrawlWorker = (runtime: Runtime, kind: CrawlWorkerKind): Worker<JobSpec> =>
+  new Worker<JobSpec>(
+    crawlQueueForKind(runtime, kind).name,
+    (job) => processCrawlJob(runtime, job),
+    {
+      connection: runtime.redisConnection,
+      concurrency: jobConcurrency(),
+    },
+  );

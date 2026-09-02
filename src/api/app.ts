@@ -4,7 +4,8 @@ import Fastify, { type FastifyInstance, type FastifyReply } from 'fastify';
 
 import { browserConcurrency, httpConcurrency } from '../config/env.js';
 import { jobSpecSchema } from '../config/schema.js';
-import { isCallbackAllowed } from '../delivery/security.js';
+import { isCallbackAllowed, validateCrawlTarget } from '../delivery/security.js';
+import { crawlQueueForSpec, removeCrawlJob } from '../queues/crawl.js';
 import {
   cancelJob,
   checkPostgresReady,
@@ -13,13 +14,15 @@ import {
   getJobPayload,
   getJobResults,
   getJobStatus,
-  ownsJob,
+  markJobFailed,
   resetJobQueued,
   type JobResultRow,
 } from '../storage/postgres/repository.js';
 import type { Runtime } from '../types.js';
 import { authenticate } from './auth.js';
+import { registerCanonicalApi } from './canonical.js';
 import { dashboardHtml } from './dashboard.js';
+import { executeDurableCommand, requireCommandHeaders, semanticHash } from './idempotency.js';
 
 interface JobParams {
   id: string;
@@ -33,7 +36,16 @@ interface WebhookTestBody {
   url?: string;
 }
 
-const publicPaths = ['/', '/health', '/healthz', '/readyz', '/api/v1/health'];
+const publicPaths = [
+  '/',
+  '/health',
+  '/healthz',
+  '/readyz',
+  '/health/live',
+  '/health/ready',
+  '/api/v1/health',
+  '/openapi.json',
+];
 
 const csvEscape = (value: unknown): string => `"${String(value ?? '').replaceAll('"', '""')}"`;
 
@@ -53,13 +65,21 @@ const resultsCsv = (rows: JobResultRow[]): string =>
     )
     .join('\n')}`;
 
-const removeQueuedJob = async (runtime: Runtime, jobId: string): Promise<void> => {
-  const queuedJob = await runtime.crawlQueue.getJob(jobId);
-  if (queuedJob) await queuedJob.remove().catch(() => undefined);
-};
-
 const notFound = (reply: FastifyReply): FastifyReply =>
   reply.code(404).send({ error: 'not_found' });
+
+const enforceRate = async (runtime: Runtime, tenantId: string): Promise<void> => {
+  const minute = Math.floor(Date.now() / 60_000);
+  const key = `kyqra:rate:${tenantId}:${minute}`;
+  const value = await runtime.redis.incr(key);
+  if (value === 1) await runtime.redis.expire(key, 120);
+  const configured = Number(process.env.KYQRA_JOBS_PER_MINUTE || 30);
+  const limit = Number.isSafeInteger(configured) && configured > 0 ? configured : 30;
+  if (value > limit) throw new Error('rate_limit_exceeded');
+};
+
+const isUniqueViolation = (error: unknown): boolean =>
+  typeof error === 'object' && error !== null && 'code' in error && error.code === '23505';
 
 export const buildApi = async (runtime: Runtime): Promise<FastifyInstance> => {
   const app = Fastify({ bodyLimit: 2_000_000 });
@@ -87,17 +107,16 @@ export const buildApi = async (runtime: Runtime): Promise<FastifyInstance> => {
     if (parsed.data.callbackUrl && !isCallbackAllowed(parsed.data.callbackUrl)) {
       return reply.code(400).send({ error: 'callback_not_allowed' });
     }
-    const idempotencyKey = String(request.headers['idempotency-key'] || '');
-    const correlationId = String(request.headers['x-correlation-id'] || '');
+    const headers = requireCommandHeaders(request, reply);
+    if (!headers) return reply;
     const tenantId = request.servicePrincipal.tenant_id;
-    if (!idempotencyKey || !correlationId) {
-      return reply.code(400).send({ error: 'idempotency_and_correlation_required' });
-    }
-    const requestHash = crypto
-      .createHash('sha256')
-      .update(JSON.stringify(parsed.data))
-      .digest('hex');
-    const prior = await findIdempotentJob(runtime.db, tenantId, idempotencyKey);
+    const requestHash = semanticHash(parsed.data);
+    let prior = await findIdempotentJob(
+      runtime.db,
+      tenantId,
+      request.servicePrincipal.client_id,
+      headers.idempotencyKey,
+    );
     if (prior) {
       if (prior.request_hash !== requestHash) {
         return reply.code(409).send({ error: 'idempotency_conflict' });
@@ -109,22 +128,60 @@ export const buildApi = async (runtime: Runtime): Promise<FastifyInstance> => {
         correlation_id: prior.correlation_id,
       });
     }
+    try {
+      await Promise.all(parsed.data.startUrls.map((url) => validateCrawlTarget(url)));
+      await enforceRate(runtime, tenantId);
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : 'crawl_target_denied';
+      return reply.code(message === 'rate_limit_exceeded' ? 429 : 400).send({ error: message });
+    }
     const jobId = crypto.randomUUID();
-    await createJob(
-      runtime.db,
-      jobId,
-      parsed.data,
-      idempotencyKey,
-      requestHash,
-      correlationId,
-      tenantId,
-    );
-    await runtime.crawlQueue.add('crawl', parsed.data, { jobId });
+    try {
+      await createJob(
+        runtime.db,
+        jobId,
+        parsed.data,
+        headers.idempotencyKey,
+        requestHash,
+        headers.correlationId,
+        tenantId,
+        request.servicePrincipal.client_id,
+      );
+    } catch (error: unknown) {
+      if (!isUniqueViolation(error)) throw error;
+      prior = await findIdempotentJob(
+        runtime.db,
+        tenantId,
+        request.servicePrincipal.client_id,
+        headers.idempotencyKey,
+      );
+      if (!prior) throw error;
+      if (prior.request_hash !== requestHash) {
+        return reply.code(409).send({ error: 'idempotency_conflict' });
+      }
+      return reply.code(200).send({
+        id: prior.job_id,
+        status: 'duplicate',
+        duplicate: true,
+        correlation_id: prior.correlation_id,
+      });
+    }
+    try {
+      await crawlQueueForSpec(runtime, parsed.data).add('crawl', parsed.data, { jobId });
+    } catch {
+      await markJobFailed(runtime.db, jobId, 'queue_enqueue_failed');
+      return reply.code(503).send({
+        id: jobId,
+        status: 'failed',
+        reconciliation_required: true,
+        correlation_id: headers.correlationId,
+      });
+    }
     return reply.code(202).send({
       id: jobId,
       status: 'queued',
       duplicate: false,
-      correlation_id: correlationId,
+      correlation_id: headers.correlationId,
     });
   });
 
@@ -158,29 +215,68 @@ export const buildApi = async (runtime: Runtime): Promise<FastifyInstance> => {
   );
 
   app.post<{ Params: JobParams }>('/api/v1/jobs/:id/cancel', async (request, reply) => {
-    if (!(await ownsJob(runtime.db, request.params.id, request.servicePrincipal.tenant_id))) {
-      return notFound(reply);
-    }
-    await removeQueuedJob(runtime, request.params.id);
-    const cancelled = await cancelJob(
+    const current = await getJobStatus(
       runtime.db,
       request.params.id,
       request.servicePrincipal.tenant_id,
     );
-    return cancelled ? { id: request.params.id, status: 'cancelled' } : notFound(reply);
+    if (!current) return notFound(reply);
+    return executeDurableCommand(
+      runtime,
+      request,
+      reply,
+      { action: 'job.cancel', resource: `jobs/${request.params.id}`, payload: {} },
+      async () => {
+        await removeCrawlJob(runtime, request.params.id).catch(() => undefined);
+        const cancelled = await cancelJob(
+          runtime.db,
+          request.params.id,
+          request.servicePrincipal.tenant_id,
+        );
+        return cancelled
+          ? { code: 200, body: { id: request.params.id, status: 'cancelled' } }
+          : { code: 409, body: { id: request.params.id, error: 'job_terminal' } };
+      },
+    );
   });
 
   app.post<{ Params: JobParams }>('/api/v1/jobs/:id/retry', async (request, reply) => {
+    const status = await getJobStatus(
+      runtime.db,
+      request.params.id,
+      request.servicePrincipal.tenant_id,
+    );
+    if (!status) return notFound(reply);
     const payload = await getJobPayload(
       runtime.db,
       request.params.id,
       request.servicePrincipal.tenant_id,
     );
     if (!payload) return notFound(reply);
-    await removeQueuedJob(runtime, request.params.id);
-    await resetJobQueued(runtime.db, request.params.id);
-    await runtime.crawlQueue.add('crawl', payload, { jobId: request.params.id });
-    return reply.code(202).send({ id: request.params.id, status: 'accepted' });
+    return executeDurableCommand(
+      runtime,
+      request,
+      reply,
+      { action: 'job.retry', resource: `jobs/${request.params.id}`, payload: {} },
+      async () => {
+        if (!['failed', 'cancelled'].includes(status.status)) {
+          return { code: 409, body: { id: request.params.id, error: 'job_not_retryable' } };
+        }
+        await removeCrawlJob(runtime, request.params.id).catch(() => undefined);
+        const reset = await resetJobQueued(
+          runtime.db,
+          request.params.id,
+          request.servicePrincipal.tenant_id,
+        );
+        if (!reset) {
+          return { code: 409, body: { id: request.params.id, error: 'job_state_changed' } };
+        }
+        await crawlQueueForSpec(runtime, payload).add('crawl', payload, {
+          jobId: request.params.id,
+        });
+        return { code: 202, body: { id: request.params.id, status: 'accepted' } };
+      },
+    );
   });
 
   app.get('/api/v1/stats', async (request, reply) => {
@@ -188,22 +284,44 @@ export const buildApi = async (runtime: Runtime): Promise<FastifyInstance> => {
       return reply.code(403).send({ error: 'forbidden' });
     }
     return {
-      queue: await runtime.crawlQueue.getJobCounts(),
+      queues: {
+        http: await runtime.httpCrawlQueue.getJobCounts(),
+        browser: await runtime.browserCrawlQueue.getJobCounts(),
+      },
       workers: { http: httpConcurrency(), browser: browserConcurrency() },
     };
   });
 
   app.post<{ Body: WebhookTestBody }>('/api/v1/webhooks/test', async (request, reply) => {
+    if (!request.servicePrincipal.roles?.includes('operations')) {
+      return reply.code(403).send({ error: 'forbidden' });
+    }
     if (!request.body?.url || !isCallbackAllowed(request.body.url)) {
       return reply.code(400).send({ error: 'callback_not_allowed' });
     }
-    await runtime.callbackQueue.add('test', {
-      jobId: 'test',
-      url: request.body.url,
-      event: 'test',
-    });
-    return { queued: true };
+    const webhookUrl = request.body.url;
+    return executeDurableCommand(
+      runtime,
+      request,
+      reply,
+      { action: 'webhook.test', resource: 'webhooks/test', payload: request.body },
+      async () => {
+        const queueId = `webhook-test-${semanticHash({
+          tenant: request.servicePrincipal.tenant_id,
+          caller: request.servicePrincipal.client_id,
+          key: request.headers['idempotency-key'],
+        })}`;
+        await runtime.callbackQueue.add(
+          'test',
+          { jobId: 'test', url: webhookUrl, event: 'test', payload: { event: 'test' } },
+          { jobId: queueId },
+        );
+        return { code: 202, body: { queued: true, operation_id: queueId } };
+      },
+    );
   });
+
+  registerCanonicalApi(app, runtime);
 
   app.get('/', async (_request, reply) => reply.type('text/html').send(dashboardHtml()));
   return app;
