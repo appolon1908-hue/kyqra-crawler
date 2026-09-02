@@ -8,7 +8,7 @@ import { RedisContainer, type StartedRedisContainer } from '@testcontainers/redi
 import type { FastifyInstance } from 'fastify';
 import request, { type SuperTest, type Test } from 'supertest';
 import { Worker } from 'bullmq';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { buildApi } from '../../src/api/app.js';
 import { removeCrawlJob } from '../../src/queues/crawl.js';
@@ -165,6 +165,49 @@ describe('HTTP job submission through real Redis and Postgres', () => {
           })
       ).body.error,
     ).toBe('callback_not_allowed');
+
+    const enqueueFailure = vi
+      .spyOn(runtime.httpCrawlQueue, 'add')
+      .mockRejectedValueOnce(new Error('fixture_enqueue_failure'));
+    const failedSubmission = await client
+      .post('/api/v1/jobs')
+      .set('Authorization', `Bearer ${API_TOKEN}`)
+      .set('Idempotency-Key', 'fixture-enqueue-failure')
+      .set('X-Correlation-Id', 'fixture-enqueue-failure-correlation')
+      .send({
+        startUrls: [`${fixture.baseUrl}/static`],
+        mode: 'single',
+        maxPages: 1,
+        maxDepth: 0,
+        browser: 'http',
+      });
+    expect(failedSubmission.status).toBe(503);
+    expect(failedSubmission.body).toMatchObject({
+      status: 'failed',
+      duplicate: false,
+      reconciliation_required: true,
+    });
+    const failedReplay = await client
+      .post('/api/v1/jobs')
+      .set('Authorization', `Bearer ${API_TOKEN}`)
+      .set('Idempotency-Key', 'fixture-enqueue-failure')
+      .set('X-Correlation-Id', 'fixture-enqueue-failure-correlation')
+      .send({
+        startUrls: [`${fixture.baseUrl}/static`],
+        mode: 'single',
+        maxPages: 1,
+        maxDepth: 0,
+        browser: 'http',
+      });
+    expect(failedReplay.status).toBe(503);
+    expect(failedReplay.body).toMatchObject({
+      id: failedSubmission.body.id,
+      status: 'failed',
+      duplicate: true,
+      reconciliation_required: true,
+    });
+    expect(enqueueFailure).toHaveBeenCalledTimes(1);
+    enqueueFailure.mockRestore();
 
     const submission = await client
       .post('/api/v1/jobs')

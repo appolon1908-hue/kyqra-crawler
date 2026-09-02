@@ -103,6 +103,8 @@ describe('canonical production API contract', () => {
     expect(worker).toContain("existing?.status === 'completed'");
     expect(worker).toContain('job.attemptsMade + 1 >= configuredAttempts');
     expect(worker).toContain("serviceWorkers = 'block'");
+    expect(worker).toContain("page.routeWebSocket('**/*'");
+    expect(worker).toContain('crawlWebSocketGuardTarget(webSocket.url())');
     expect(worker).toContain('useIncognitoPages: true');
     expect(dockerfile).toContain('/root/.npm');
     expect(dockerfile).toContain('FROM scratch');

@@ -13,6 +13,7 @@ import {
 } from '../../src/config/env.js';
 import {
   callbackSignatureInput,
+  crawlWebSocketGuardTarget,
   createPinnedCallbackAgent,
   isCallbackAllowed,
   isProhibitedAddress,
@@ -72,6 +73,18 @@ describe('crawler core behavior', () => {
     expect(isProhibitedAddress('2001:4860:4860::8888')).toBe(false);
     expect(callbackSignatureInput('post', '//events//done', '1', '2', 'kyqra', '{}')).toMatch(
       /^v1\nPOST\n\/events\/done\n1\n2\nkyqra\n[0-9a-f]{64}$/,
+    );
+  });
+
+  it('maps WebSocket targets onto the same SSRF guard policy', () => {
+    expect(crawlWebSocketGuardTarget('ws://example.test/socket')).toBe(
+      'http://example.test/socket',
+    );
+    expect(crawlWebSocketGuardTarget('wss://example.test/socket')).toBe(
+      'https://example.test/socket',
+    );
+    expect(() => crawlWebSocketGuardTarget('https://example.test/socket')).toThrow(
+      'crawl_target_denied',
     );
   });
 

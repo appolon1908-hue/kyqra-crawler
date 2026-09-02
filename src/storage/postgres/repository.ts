@@ -18,6 +18,8 @@ export interface IdempotentJob {
   job_id: string;
   request_hash: string;
   correlation_id: string;
+  status: string;
+  error: string | null;
 }
 
 export interface JobStatusRow {
@@ -151,9 +153,10 @@ export const findIdempotentJob = async (
   idempotencyKey: string,
 ): Promise<IdempotentJob | null> => {
   const result = await db.query<IdempotentJob>(
-    `select job_id,request_hash,correlation_id from job_requests
-      where tenant_id=$1 and caller_id=$2 and action='crawl.job.create'
-        and api_version='api/v1' and resource='jobs' and idempotency_key=$3`,
+    `select m.job_id,m.request_hash,m.correlation_id,j.status,j.error
+       from job_requests m join jobs j on j.id=m.job_id
+      where m.tenant_id=$1 and m.caller_id=$2 and m.action='crawl.job.create'
+        and m.api_version='api/v1' and m.resource='jobs' and m.idempotency_key=$3`,
     [tenantId, callerId, idempotencyKey],
   );
   return result.rows[0] ?? null;

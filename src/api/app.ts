@@ -16,6 +16,7 @@ import {
   getJobStatus,
   markJobFailed,
   resetJobQueued,
+  type IdempotentJob,
   type JobResultRow,
 } from '../storage/postgres/repository.js';
 import type { Runtime } from '../types.js';
@@ -67,6 +68,24 @@ const resultsCsv = (rows: JobResultRow[]): string =>
 
 const notFound = (reply: FastifyReply): FastifyReply =>
   reply.code(404).send({ error: 'not_found' });
+
+const sendIdempotentJob = (reply: FastifyReply, prior: IdempotentJob): FastifyReply => {
+  if (prior.status === 'failed' && prior.error === 'queue_enqueue_failed') {
+    return reply.code(503).send({
+      id: prior.job_id,
+      status: 'failed',
+      duplicate: true,
+      reconciliation_required: true,
+      correlation_id: prior.correlation_id,
+    });
+  }
+  return reply.code(200).send({
+    id: prior.job_id,
+    status: 'duplicate',
+    duplicate: true,
+    correlation_id: prior.correlation_id,
+  });
+};
 
 const enforceRate = async (runtime: Runtime, tenantId: string): Promise<void> => {
   const minute = Math.floor(Date.now() / 60_000);
@@ -121,12 +140,7 @@ export const buildApi = async (runtime: Runtime): Promise<FastifyInstance> => {
       if (prior.request_hash !== requestHash) {
         return reply.code(409).send({ error: 'idempotency_conflict' });
       }
-      return reply.code(200).send({
-        id: prior.job_id,
-        status: 'duplicate',
-        duplicate: true,
-        correlation_id: prior.correlation_id,
-      });
+      return sendIdempotentJob(reply, prior);
     }
     try {
       await Promise.all(parsed.data.startUrls.map((url) => validateCrawlTarget(url)));
@@ -159,12 +173,7 @@ export const buildApi = async (runtime: Runtime): Promise<FastifyInstance> => {
       if (prior.request_hash !== requestHash) {
         return reply.code(409).send({ error: 'idempotency_conflict' });
       }
-      return reply.code(200).send({
-        id: prior.job_id,
-        status: 'duplicate',
-        duplicate: true,
-        correlation_id: prior.correlation_id,
-      });
+      return sendIdempotentJob(reply, prior);
     }
     try {
       await crawlQueueForSpec(runtime, parsed.data).add('crawl', parsed.data, { jobId });
@@ -173,6 +182,7 @@ export const buildApi = async (runtime: Runtime): Promise<FastifyInstance> => {
       return reply.code(503).send({
         id: jobId,
         status: 'failed',
+        duplicate: false,
         reconciliation_required: true,
         correlation_id: headers.correlationId,
       });

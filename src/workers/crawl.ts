@@ -12,6 +12,7 @@ import { PlaywrightCrawler } from '@crawlee/playwright';
 import { browserConcurrency, httpConcurrency, jobConcurrency } from '../config/env.js';
 import { jobSpecSchema, type JobSpec } from '../config/schema.js';
 import {
+  crawlWebSocketGuardTarget,
   createCrawlTargetGuard,
   createPinnedCrawlLookup,
   validateCrawlRedirectTarget,
@@ -191,6 +192,14 @@ export const processCrawlJob = async (
                   return route.continue();
                 } catch {
                   return route.abort('blockedbyclient');
+                }
+              });
+              await page.routeWebSocket('**/*', async (webSocket) => {
+                try {
+                  await guardTarget(crawlWebSocketGuardTarget(webSocket.url()));
+                  webSocket.connectToServer();
+                } catch {
+                  await webSocket.close({ code: 1008, reason: 'target_denied' });
                 }
               });
             },

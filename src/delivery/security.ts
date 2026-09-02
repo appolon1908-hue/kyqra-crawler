@@ -193,6 +193,14 @@ export const createCrawlTargetGuard = (): ((rawUrl: string) => Promise<void>) =>
   };
 };
 
+export const crawlWebSocketGuardTarget = (rawUrl: string): string => {
+  const target = new URL(rawUrl);
+  if (target.protocol === 'ws:') target.protocol = 'http:';
+  else if (target.protocol === 'wss:') target.protocol = 'https:';
+  else throw new Error('crawl_target_denied');
+  return target.toString();
+};
+
 export const createPinnedCrawlLookup = async (rawUrl: string): Promise<net.LookupFunction> => {
   const initial = await resolveCrawlTarget(rawUrl);
   const pinned = new Map<string, ResolvedCrawlTarget['addresses']>([
