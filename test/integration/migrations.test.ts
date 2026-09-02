@@ -102,6 +102,7 @@ describe('PostgreSQL migrations', () => {
       '00000000-0000-4000-8000-000000000010',
       '00000000-0000-4000-8000-000000000011',
     ];
+    const rollbackUnaffectedJob = '00000000-0000-4000-8000-000000000012';
     for (const [index, jobId] of rollbackDuplicateJobs.entries()) {
       await db.query(
         "insert into jobs(id,tenant_id,status,spec,budget) values($1,'rollback-tenant','queued',$2,$3)",
@@ -114,6 +115,16 @@ describe('PostgreSQL migrations', () => {
         [jobId, `rollback-correlation-${index}`, `rollback-caller-${index}`],
       );
     }
+    await db.query(
+      "insert into jobs(id,tenant_id,status,spec,budget) values($1,'rollback-tenant','queued',$2,$3)",
+      [rollbackUnaffectedJob, { startUrls: ['https://fixture.test'] }, {}],
+    );
+    await db.query(
+      `insert into job_requests(
+         job_id,idempotency_key,request_hash,correlation_id,tenant_id,caller_id
+       ) values($1,'unaffected-key','rollback-hash','unaffected-correlation','rollback-tenant','unaffected-caller')`,
+      [rollbackUnaffectedJob],
+    );
 
     await migrateDatabase(databaseUrl, 'down', 1);
     expect(await applicationTables()).toEqual(targetV2Tables);
@@ -122,11 +133,21 @@ describe('PostgreSQL migrations', () => {
        where job_id=any($1::uuid[]) order by job_id`,
       [rollbackDuplicateJobs],
     );
-    expect(new Set(rollbackKeys.rows.map(({ idempotency_key }) => idempotency_key)).size).toBe(2);
+    expect(rollbackKeys.rows[0]?.idempotency_key).toBe('shared-key');
+    expect(rollbackKeys.rows[1]?.idempotency_key).toBe(
+      `v3-rollback-duplicate:${rollbackDuplicateJobs[1]}`,
+    );
+    const unaffectedKey = await db.query<{ idempotency_key: string }>(
+      'select idempotency_key from job_requests where job_id=$1',
+      [rollbackUnaffectedJob],
+    );
+    expect(unaffectedKey.rows[0]?.idempotency_key).toBe('unaffected-key');
     await db.query('delete from job_requests where job_id=any($1::uuid[])', [
-      rollbackDuplicateJobs,
+      [...rollbackDuplicateJobs, rollbackUnaffectedJob],
     ]);
-    await db.query('delete from jobs where id=any($1::uuid[])', [rollbackDuplicateJobs]);
+    await db.query('delete from jobs where id=any($1::uuid[])', [
+      [...rollbackDuplicateJobs, rollbackUnaffectedJob],
+    ]);
 
     await migrateDatabase(databaseUrl, 'down', 1);
     expect(await applicationTables()).toEqual(legacyTables);
