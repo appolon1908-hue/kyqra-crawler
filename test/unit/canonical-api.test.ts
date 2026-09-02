@@ -95,6 +95,7 @@ describe('canonical production API contract', () => {
   });
 
   it('uses schema-aware canonical readiness and a callback-only recovery path', () => {
+    const dockerfile = fs.readFileSync('Dockerfile', 'utf8');
     const canonical = fs.readFileSync('src/api/canonical.ts', 'utf8');
     const worker = fs.readFileSync('src/workers/crawl.ts', 'utf8');
     expect(canonical).toContain('await checkPostgresReady(runtime.db)');
@@ -103,5 +104,6 @@ describe('canonical production API contract', () => {
     expect(worker).toContain('job.attemptsMade + 1 >= configuredAttempts');
     expect(worker).toContain("serviceWorkers = 'block'");
     expect(worker).toContain('useIncognitoPages: true');
+    expect(dockerfile).toContain('/root/.npm');
   });
 });

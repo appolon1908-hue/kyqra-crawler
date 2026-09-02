@@ -19,7 +19,7 @@ USER root
 RUN apt-get purge -y --auto-remove gstreamer1.0-plugins-bad libgstreamer-plugins-bad1.0-0 \
     && rm -rf /var/lib/apt/lists/* /usr/lib/node_modules/npm /usr/lib/node_modules/yarn \
       /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/yarn \
-      /usr/bin/npm /usr/bin/npx /usr/bin/yarn /usr/bin/yarnpkg
+      /usr/bin/npm /usr/bin/npx /usr/bin/yarn /usr/bin/yarnpkg /root/.npm
 COPY --from=build --chown=pwuser:pwuser /app/package.json /app/package-lock.json ./
 COPY --from=build --chown=pwuser:pwuser /app/node_modules ./node_modules
 COPY --from=build --chown=pwuser:pwuser /app/dist ./dist
