@@ -94,6 +94,7 @@ export const isProhibitedAddress = (address: string): boolean => {
   return (
     value === '::' ||
     value === '::1' ||
+    value.startsWith('ff') ||
     value.startsWith('fc') ||
     value.startsWith('fd') ||
     value.startsWith('fe8') ||

@@ -195,7 +195,16 @@ export const processCrawlJob = async (
               });
             },
           ],
+          browserPoolOptions: {
+            prePageCreateHooks: [
+              (_pageId, _browserController, pageOptions) => {
+                if (!pageOptions) throw new Error('browser_context_options_missing');
+                pageOptions.serviceWorkers = 'block';
+              },
+            ],
+          },
           launchContext: {
+            useIncognitoPages: true,
             launchOptions: { headless: true, args: ['--disable-dev-shm-usage'] },
           },
           requestHandler: async (context) => {

@@ -17,9 +17,15 @@ grep -Fq 'published: "3100"' <<<"$rendered"
 ! grep -Eq 'published: "?(5432|6379)' <<<"$rendered"
 ! grep -Eq 'host_ip: (0\.0\.0\.0|10\.40\.0\.4)' <<<"$rendered"
 jq -e '
+  . as $compose |
   (.services.migrate.command == ["node", "dist/storage/postgres/migrate.js", "up"]) and
   (.services.migrate.restart == "no") and
   ((.services.migrate.ports // []) | length == 0) and
-  (.services.api.depends_on.migrate.condition == "service_completed_successfully")
+  (.services.api.depends_on.migrate.condition == "service_completed_successfully") and
+  (
+    ["migrate", "api", "http-worker", "browser-worker", "callback-worker"] |
+    map(. as $service | (($compose.services[$service].group_add // []) | map(tostring) | index("65534")) != null) |
+    all
+  )
 ' <<<"$rendered_json" >/dev/null
 echo 'DOCKER_COMPOSE_VALIDATE=PASS'

@@ -101,5 +101,7 @@ describe('canonical production API contract', () => {
     expect(canonical).toContain('callbacks_reconciled: true');
     expect(worker).toContain("existing?.status === 'completed'");
     expect(worker).toContain('job.attemptsMade + 1 >= configuredAttempts');
+    expect(worker).toContain("serviceWorkers = 'block'");
+    expect(worker).toContain('useIncognitoPages: true');
   });
 });
