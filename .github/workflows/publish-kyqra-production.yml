@@ -166,7 +166,7 @@ jobs:
           fi
           if ! cosign verify-attestation --type slsaprovenance1 \
             --certificate-identity "$IDENTITY" --certificate-oidc-issuer "$ISSUER" \
-            "$exact_image" 2>/dev/null | jq -e --arg source "$SOURCE_SHA" --arg digest "$CANDIDATE_DIGEST" '
+            "$exact_image" 2>/dev/null | jq -s -e --arg source "$SOURCE_SHA" --arg digest "$CANDIDATE_DIGEST" '
               any(.[];
                 ((.payload | @base64d | fromjson).predicate.buildDefinition.externalParameters.sourceCommit == $source) and
                 ((.payload | @base64d | fromjson).predicate.buildDefinition.externalParameters.registryDigest == $digest)
@@ -176,7 +176,7 @@ jobs:
           if ! cosign verify-attestation --type spdxjson \
             --certificate-identity "$IDENTITY" --certificate-oidc-issuer "$ISSUER" \
             "$exact_image" 2>/dev/null | \
-            jq -e 'any(.[]; ((.payload | @base64d | fromjson).predicate.spdxVersion == "SPDX-2.3"))' >/dev/null; then
+            jq -s -e 'any(.[]; ((.payload | @base64d | fromjson).predicate.spdxVersion == "SPDX-2.3"))' >/dev/null; then
             cosign attest --yes --type spdxjson --predicate sbom.spdx.json "$exact_image"
           fi
 
@@ -197,12 +197,12 @@ jobs:
             --certificate-identity "$IDENTITY" --certificate-oidc-issuer "$ISSUER" \
             "$exact_image" > sbom-verification.json
           jq -e 'length > 0' signature-verification.json
-          jq -e --arg source "$SOURCE_SHA" --arg digest "$CANDIDATE_DIGEST" '
+          jq -s -e --arg source "$SOURCE_SHA" --arg digest "$CANDIDATE_DIGEST" '
             any(.[];
               ((.payload | @base64d | fromjson).predicate.buildDefinition.externalParameters.sourceCommit == $source) and
               ((.payload | @base64d | fromjson).predicate.buildDefinition.externalParameters.registryDigest == $digest)
             )' provenance-verification.json
-          jq -e 'any(.[]; ((.payload | @base64d | fromjson).predicate.spdxVersion == "SPDX-2.3"))' \
+          jq -s -e 'any(.[]; ((.payload | @base64d | fromjson).predicate.spdxVersion == "SPDX-2.3"))' \
             sbom-verification.json
           echo "$SOURCE_SHA" > SOURCE_SHA
           echo "$CANDIDATE_DIGEST" > IMAGE_DIGEST
