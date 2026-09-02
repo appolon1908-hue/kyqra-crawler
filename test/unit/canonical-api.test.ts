@@ -31,11 +31,15 @@ describe('canonical production API contract', () => {
       ['get', '/v1/system/readiness'],
     ];
     for (const [method, path] of required) expect(method in kyqraOpenApi.paths[path]).toBe(true);
+    expect(
+      kyqraOpenApi.paths['/v1/jobs/{id}/cancel'].post.parameters.map(({ name }) => name),
+    ).toEqual(['id', 'Idempotency-Key', 'X-Correlation-Id']);
   });
 
   it('denies loopback and cloud metadata crawl targets by default', async () => {
     delete process.env.KYQRA_ALLOW_TEST_TARGETS;
     await expect(validateCrawlTarget('http://127.0.0.1/')).rejects.toThrow('private_address');
+    await expect(validateCrawlTarget('http://10.40.0.1/')).rejects.toThrow('private_address');
     await expect(validateCrawlTarget('http://169.254.169.254/latest/meta-data')).rejects.toThrow(
       'private_address',
     );
@@ -46,6 +50,8 @@ describe('canonical production API contract', () => {
     const migration = fs.readFileSync('migrations/0003_canonical_operations.sql', 'utf8');
     expect(migration).toContain('CREATE TABLE job_events');
     expect(migration).toContain('CREATE TABLE callback_configs');
+    expect(migration).toContain('CREATE TABLE command_requests');
+    expect(migration).toContain('job_requests_semantic_idempotency');
     expect(migration).toContain('-- Down Migration');
   });
 });

@@ -35,6 +35,17 @@ export interface JobResultRow {
   provenance: Record<string, string>;
 }
 
+export interface CommandRequestRow {
+  id: string;
+  request_hash: string;
+  correlation_id: string;
+  status: 'PROCESSING' | 'SUCCEEDED' | 'FAILED';
+  response_code: number | null;
+  response: Record<string, unknown> | null;
+  created_at: Date;
+  updated_at: Date;
+}
+
 export interface CallbackConfigRow {
   id: string;
   url: string;
@@ -47,6 +58,7 @@ export interface CallbackConfigRow {
 export const checkPostgresReady = async (db: Pool): Promise<void> => {
   await db.query('select tenant_id,spec,budget from jobs limit 0');
   await db.query('select tenant_id,event_type,status from job_events limit 0');
+  await db.query('select tenant_id,caller_id,action,status from command_requests limit 0');
   await db.query('select tenant_id,url,events from callback_configs limit 0');
 };
 
@@ -103,11 +115,14 @@ export const markJobFailed = async (db: Pool, jobId: string, error: string): Pro
 export const findIdempotentJob = async (
   db: Pool,
   tenantId: string,
+  callerId: string,
   idempotencyKey: string,
 ): Promise<IdempotentJob | null> => {
   const result = await db.query<IdempotentJob>(
-    'select job_id,request_hash,correlation_id from job_requests where tenant_id=$1 and idempotency_key=$2',
-    [tenantId, idempotencyKey],
+    `select job_id,request_hash,correlation_id from job_requests
+      where tenant_id=$1 and caller_id=$2 and action='crawl.job.create'
+        and api_version='api/v1' and resource='jobs' and idempotency_key=$3`,
+    [tenantId, callerId, idempotencyKey],
   );
   return result.rows[0] ?? null;
 };
@@ -120,6 +135,7 @@ const insertJobTransaction = async (
   requestHash: string,
   correlationId: string,
   tenantId: string,
+  callerId: string,
 ): Promise<void> => {
   await client.query('begin');
   try {
@@ -129,8 +145,11 @@ const insertJobTransaction = async (
       payload,
     ]);
     await client.query(
-      'insert into job_requests(job_id,idempotency_key,request_hash,correlation_id,tenant_id) values($1,$2,$3,$4,$5)',
-      [jobId, idempotencyKey, requestHash, correlationId, tenantId],
+      `insert into job_requests(
+         job_id,idempotency_key,request_hash,correlation_id,tenant_id,
+         caller_id,action,api_version,resource
+       ) values($1,$2,$3,$4,$5,$6,'crawl.job.create','api/v1','jobs')`,
+      [jobId, idempotencyKey, requestHash, correlationId, tenantId, callerId],
     );
     await client.query(
       "insert into job_events(job_id,tenant_id,event_type,status,payload) values($1,$2,'job.queued','queued',$3)",
@@ -151,6 +170,7 @@ export const createJob = async (
   requestHash: string,
   correlationId: string,
   tenantId: string,
+  callerId: string,
 ): Promise<void> => {
   const client = await db.connect();
   try {
@@ -162,6 +182,7 @@ export const createJob = async (
       requestHash,
       correlationId,
       tenantId,
+      callerId,
     );
   } finally {
     client.release();
@@ -207,17 +228,32 @@ export const ownsJob = async (db: Pool, jobId: string, tenantId: string): Promis
 };
 
 export const cancelJob = async (db: Pool, jobId: string, tenantId: string): Promise<boolean> => {
-  const result = await db.query(
-    "update jobs j set status='cancelled',updated_at=now() from job_requests m where j.id=$1 and m.job_id=j.id and m.tenant_id=$2 returning j.id",
-    [jobId, tenantId],
-  );
-  if ((result.rowCount ?? 0) > 0) {
-    await db.query(
+  const client = await db.connect();
+  try {
+    await client.query('begin');
+    const result = await client.query(
+      `update jobs j set status='cancelled',finished_at=now(),updated_at=now()
+         from job_requests m
+        where j.id=$1 and m.job_id=j.id and m.tenant_id=$2
+          and j.status in ('queued','running') returning j.id`,
+      [jobId, tenantId],
+    );
+    if ((result.rowCount ?? 0) === 0) {
+      await client.query('rollback');
+      return false;
+    }
+    await client.query(
       "insert into job_events(job_id,tenant_id,event_type,status,payload) values($1,$2,'job.cancelled','cancelled','{}')",
       [jobId, tenantId],
     );
+    await client.query('commit');
+    return true;
+  } catch (error: unknown) {
+    await client.query('rollback');
+    throw error;
+  } finally {
+    client.release();
   }
-  return (result.rowCount ?? 0) > 0;
 };
 
 export const getJobPayload = async (
@@ -232,15 +268,35 @@ export const getJobPayload = async (
   return result.rows[0]?.payload ?? null;
 };
 
-export const resetJobQueued = async (db: Pool, jobId: string): Promise<void> => {
-  await db.query(
-    "update jobs set status='queued',error=null,started_at=null,finished_at=null,updated_at=now() where id=$1",
-    [jobId],
-  );
-  await db.query(
-    "insert into job_events(job_id,tenant_id,event_type,status,payload) select id,tenant_id,'job.queued','queued','{}' from jobs where id=$1",
-    [jobId],
-  );
+export const resetJobQueued = async (
+  db: Pool,
+  jobId: string,
+  tenantId: string,
+): Promise<boolean> => {
+  const client = await db.connect();
+  try {
+    await client.query('begin');
+    const result = await client.query(
+      `update jobs set status='queued',error=null,started_at=null,finished_at=null,updated_at=now()
+        where id=$1 and tenant_id=$2 and status in ('failed','cancelled') returning id`,
+      [jobId, tenantId],
+    );
+    if ((result.rowCount ?? 0) === 0) {
+      await client.query('rollback');
+      return false;
+    }
+    await client.query(
+      "insert into job_events(job_id,tenant_id,event_type,status,payload) values($1,$2,'job.queued','queued','{}')",
+      [jobId, tenantId],
+    );
+    await client.query('commit');
+    return true;
+  } catch (error: unknown) {
+    await client.query('rollback');
+    throw error;
+  } finally {
+    client.release();
+  }
 };
 
 export const listJobs = async (
@@ -288,38 +344,84 @@ export const getCallback = async (
 
 export const createCallback = async (
   db: Pool,
-  values: {
-    id: string;
-    tenantId: string;
-    url: string;
-    events: string[];
-    idempotencyKey: string;
-    requestHash: string;
-  },
-): Promise<{ row: CallbackConfigRow; duplicate: boolean }> => {
-  const prior = await db.query<CallbackConfigRow & { request_hash: string }>(
-    'select id,url,events,enabled,created_at,updated_at,request_hash from callback_configs where tenant_id=$1 and idempotency_key=$2',
-    [values.tenantId, values.idempotencyKey],
-  );
-  const existing = prior.rows[0];
-  if (existing) {
-    if (existing.request_hash !== values.requestHash) throw new Error('idempotency_conflict');
-    return { row: existing, duplicate: true };
-  }
+  values: { id: string; tenantId: string; url: string; events: string[] },
+): Promise<CallbackConfigRow> => {
   const result = await db.query<CallbackConfigRow>(
-    `insert into callback_configs(id,tenant_id,url,events,idempotency_key,request_hash)
-     values($1,$2,$3,$4,$5,$6)
+    `insert into callback_configs(id,tenant_id,url,events)
+     values($1,$2,$3,$4)
      returning id,url,events,enabled,created_at,updated_at`,
-    [
-      values.id,
-      values.tenantId,
-      values.url,
-      values.events,
-      values.idempotencyKey,
-      values.requestHash,
-    ],
+    [values.id, values.tenantId, values.url, values.events],
   );
   const row = result.rows[0];
   if (!row) throw new Error('callback_insert_failed');
-  return { row, duplicate: false };
+  return row;
+};
+
+export const beginCommand = async (
+  db: Pool,
+  values: {
+    id: string;
+    tenantId: string;
+    callerId: string;
+    action: string;
+    resource: string;
+    idempotencyKey: string;
+    requestHash: string;
+    correlationId: string;
+  },
+): Promise<{ row: CommandRequestRow; duplicate: boolean }> => {
+  const inserted = await db.query<CommandRequestRow>(
+    `insert into command_requests(
+       id,tenant_id,caller_id,action,api_version,resource,idempotency_key,
+       request_hash,correlation_id,status
+     ) values($1,$2,$3,$4,'api/v1',$5,$6,$7,$8,'PROCESSING')
+     on conflict (tenant_id,caller_id,action,api_version,resource,idempotency_key)
+     do nothing
+     returning id,request_hash,correlation_id,status,response_code,response,created_at,updated_at`,
+    [
+      values.id,
+      values.tenantId,
+      values.callerId,
+      values.action,
+      values.resource,
+      values.idempotencyKey,
+      values.requestHash,
+      values.correlationId,
+    ],
+  );
+  const created = inserted.rows[0];
+  if (created) return { row: created, duplicate: false };
+  const prior = await db.query<CommandRequestRow>(
+    `select id,request_hash,correlation_id,status,response_code,response,created_at,updated_at
+       from command_requests
+      where tenant_id=$1 and caller_id=$2 and action=$3 and api_version='api/v1'
+        and resource=$4 and idempotency_key=$5`,
+    [values.tenantId, values.callerId, values.action, values.resource, values.idempotencyKey],
+  );
+  const existing = prior.rows[0];
+  if (!existing) throw new Error('idempotency_readback_failed');
+  if (existing.request_hash !== values.requestHash) {
+    throw new Error('idempotency_conflict');
+  }
+  return { row: existing, duplicate: true };
+};
+
+export const completeCommand = async (
+  db: Pool,
+  commandId: string,
+  responseCode: number,
+  response: Record<string, unknown>,
+): Promise<void> => {
+  const result = await db.query(
+    `update command_requests
+        set status=$2,response_code=$3,response=$4,updated_at=now()
+      where id=$1 and status='PROCESSING'`,
+    [
+      commandId,
+      responseCode >= 200 && responseCode < 400 ? 'SUCCEEDED' : 'FAILED',
+      responseCode,
+      response,
+    ],
+  );
+  if ((result.rowCount ?? 0) !== 1) throw new Error('command_completion_conflict');
 };

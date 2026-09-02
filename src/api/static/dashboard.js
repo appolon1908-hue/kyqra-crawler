@@ -3,10 +3,19 @@ const headers = () => ({
   'content-type': 'application/json',
 });
 
+const commandHeaders = () => {
+  const commandId = crypto.randomUUID();
+  return {
+    ...headers(),
+    'Idempotency-Key': commandId,
+    'X-Correlation-Id': commandId,
+  };
+};
+
 async function go() {
   const response = await fetch('/api/v1/jobs', {
     method: 'POST',
-    headers: headers(),
+    headers: commandHeaders(),
     body: JSON.stringify({
       startUrls: u.value.split(/\n/).filter(Boolean),
       mode: m.value,
@@ -30,7 +39,7 @@ async function st() {
 async function cn() {
   const response = await fetch(`/api/v1/jobs/${j.value}/cancel`, {
     method: 'POST',
-    headers: headers(),
+    headers: commandHeaders(),
   });
   o.textContent = await response.text();
 }

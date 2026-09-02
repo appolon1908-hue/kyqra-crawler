@@ -239,10 +239,50 @@ describe('HTTP job submission through real Redis and Postgres', () => {
     expect(stats.status).toBe(200);
     expect(stats.body.workers).toEqual({ http: 2, browser: 3 });
 
+    const jobs = await client.get('/v1/jobs').set('Authorization', `Bearer ${API_TOKEN}`);
+    expect(jobs.status).toBe(200);
+    expect(jobs.body.items.some(({ id }: { id: string }) => id === jobId)).toBe(true);
+    const events = await client
+      .get(`/v1/jobs/${jobId}/events`)
+      .set('Authorization', `Bearer ${API_TOKEN}`);
+    expect(events.status).toBe(200);
+    expect(events.body.items.map(({ status }: { status: string }) => status)).toEqual(
+      expect.arrayContaining(['queued', 'running', 'completed']),
+    );
+    const operation = await client
+      .get(`/v1/operations/${jobId}`)
+      .set('Authorization', `Bearer ${API_TOKEN}`);
+    expect(operation.body).toMatchObject({ operation_id: jobId, status: 'SUCCEEDED' });
+    expect(
+      (await client.get('/metrics').set('Authorization', `Bearer ${READONLY_TOKEN}`)).status,
+    ).toBe(403);
+    expect((await client.get('/metrics').set('Authorization', `Bearer ${API_TOKEN}`)).status).toBe(
+      200,
+    );
+    expect((await client.get('/openapi.json')).body.paths['/api/v1/jobs']).toBeDefined();
+
     const cancelled = await client
       .post(`/api/v1/jobs/${jobId}/cancel`)
-      .set('Authorization', `Bearer ${API_TOKEN}`);
-    expect(cancelled.body).toEqual({ id: jobId, status: 'cancelled' });
+      .set('Authorization', `Bearer ${API_TOKEN}`)
+      .set('Idempotency-Key', 'terminal-cancel-1')
+      .set('X-Correlation-Id', 'terminal-cancel-1');
+    expect(cancelled.status).toBe(409);
+    expect(cancelled.body).toEqual({ id: jobId, error: 'job_terminal' });
+    const cancelledReplay = await client
+      .post(`/api/v1/jobs/${jobId}/cancel`)
+      .set('Authorization', `Bearer ${API_TOKEN}`)
+      .set('Idempotency-Key', 'terminal-cancel-1')
+      .set('X-Correlation-Id', 'terminal-cancel-1');
+    expect(cancelledReplay.status).toBe(409);
+    expect(cancelledReplay.body).toEqual(cancelled.body);
+
+    const completedRetry = await client
+      .post(`/api/v1/jobs/${jobId}/retry`)
+      .set('Authorization', `Bearer ${API_TOKEN}`)
+      .set('Idempotency-Key', 'terminal-cancel-1')
+      .set('X-Correlation-Id', 'terminal-retry-1');
+    expect(completedRetry.status).toBe(409);
+    expect(completedRetry.body.error).toBe('job_not_retryable');
 
     for (const endpoint of [
       `/api/v1/jobs/${crypto.randomUUID()}`,

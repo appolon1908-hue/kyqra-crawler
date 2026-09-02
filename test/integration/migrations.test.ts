@@ -28,7 +28,12 @@ const targetV2Tables = [
   'sessions',
   'tenants',
 ];
-const targetTables = [...targetV2Tables, 'callback_configs', 'job_events'].sort();
+const targetTables = [
+  ...targetV2Tables,
+  'callback_configs',
+  'command_requests',
+  'job_events',
+].sort();
 
 describe('PostgreSQL migrations', () => {
   let postgres: StartedPostgreSqlContainer;
