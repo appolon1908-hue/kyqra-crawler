@@ -103,6 +103,7 @@ describe('PostgreSQL migrations', () => {
       '00000000-0000-4000-8000-000000000011',
     ];
     const rollbackUnaffectedJob = '00000000-0000-4000-8000-000000000012';
+    const rollbackCollisionJob = '00000000-0000-4000-8000-000000000013';
     for (const [index, jobId] of rollbackDuplicateJobs.entries()) {
       await db.query(
         "insert into jobs(id,tenant_id,status,spec,budget) values($1,'rollback-tenant','queued',$2,$3)",
@@ -125,6 +126,16 @@ describe('PostgreSQL migrations', () => {
        ) values($1,'unaffected-key','rollback-hash','unaffected-correlation','rollback-tenant','unaffected-caller')`,
       [rollbackUnaffectedJob],
     );
+    await db.query(
+      "insert into jobs(id,tenant_id,status,spec,budget) values($1,'rollback-tenant','queued',$2,$3)",
+      [rollbackCollisionJob, { startUrls: ['https://fixture.test'] }, {}],
+    );
+    await db.query(
+      `insert into job_requests(
+         job_id,idempotency_key,request_hash,correlation_id,tenant_id,caller_id
+       ) values($1,$2,'rollback-hash','collision-correlation','rollback-tenant','collision-caller')`,
+      [rollbackCollisionJob, `v3-rollback-duplicate:${rollbackDuplicateJobs[1]}:0`],
+    );
 
     await migrateDatabase(databaseUrl, 'down', 1);
     expect(await applicationTables()).toEqual(targetV2Tables);
@@ -135,18 +146,25 @@ describe('PostgreSQL migrations', () => {
     );
     expect(rollbackKeys.rows[0]?.idempotency_key).toBe('shared-key');
     expect(rollbackKeys.rows[1]?.idempotency_key).toBe(
-      `v3-rollback-duplicate:${rollbackDuplicateJobs[1]}`,
+      `v3-rollback-duplicate:${rollbackDuplicateJobs[1]}:1`,
     );
     const unaffectedKey = await db.query<{ idempotency_key: string }>(
       'select idempotency_key from job_requests where job_id=$1',
       [rollbackUnaffectedJob],
     );
     expect(unaffectedKey.rows[0]?.idempotency_key).toBe('unaffected-key');
+    const collisionKey = await db.query<{ idempotency_key: string }>(
+      'select idempotency_key from job_requests where job_id=$1',
+      [rollbackCollisionJob],
+    );
+    expect(collisionKey.rows[0]?.idempotency_key).toBe(
+      `v3-rollback-duplicate:${rollbackDuplicateJobs[1]}:0`,
+    );
     await db.query('delete from job_requests where job_id=any($1::uuid[])', [
-      [...rollbackDuplicateJobs, rollbackUnaffectedJob],
+      [...rollbackDuplicateJobs, rollbackUnaffectedJob, rollbackCollisionJob],
     ]);
     await db.query('delete from jobs where id=any($1::uuid[])', [
-      [...rollbackDuplicateJobs, rollbackUnaffectedJob],
+      [...rollbackDuplicateJobs, rollbackUnaffectedJob, rollbackCollisionJob],
     ]);
 
     await migrateDatabase(databaseUrl, 'down', 1);
