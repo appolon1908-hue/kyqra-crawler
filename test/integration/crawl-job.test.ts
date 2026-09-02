@@ -261,6 +261,90 @@ describe('HTTP job submission through real Redis and Postgres', () => {
     );
     expect((await client.get('/openapi.json')).body.paths['/api/v1/jobs']).toBeDefined();
 
+    expect((await client.get('/health/live')).body).toEqual({ status: 'live' });
+    expect((await client.get('/health/ready')).body).toEqual({
+      status: 'ready',
+      redis: 'ok',
+      postgres: 'ok',
+    });
+    const identity = await client.get('/v1/me').set('Authorization', `Bearer ${API_TOKEN}`);
+    expect(identity.body).toMatchObject({
+      tenant_id: 'fixture-tenant',
+      client_id: 'fixture-client',
+      roles: ['operations'],
+    });
+    expect(
+      (await client.get('/v1/capabilities').set('Authorization', `Bearer ${API_TOKEN}`)).body
+        .capabilities,
+    ).toEqual(['crawl.jobs', 'crawl.results', 'callbacks', 'operations']);
+    expect(
+      (await client.get('/v1/system/readiness').set('Authorization', `Bearer ${API_TOKEN}`)).body,
+    ).toMatchObject({ status: 'ready', redis: 'ok', postgres: 'ok' });
+    expect(
+      (await client.get(`/v1/jobs/${jobId}/results`).set('Authorization', `Bearer ${API_TOKEN}`))
+        .body.count,
+    ).toBe(1);
+    expect(
+      (await client.get('/v1/operations').set('Authorization', `Bearer ${API_TOKEN}`)).body.items,
+    ).toEqual(expect.arrayContaining([expect.objectContaining({ operation_id: jobId })]));
+    expect(
+      (
+        await client
+          .get(`/v1/operations/${jobId}/events`)
+          .set('Authorization', `Bearer ${API_TOKEN}`)
+      ).body.items.length,
+    ).toBeGreaterThan(0);
+    expect(
+      (
+        await client
+          .get(`/v1/operations/${jobId}/attempts`)
+          .set('Authorization', `Bearer ${API_TOKEN}`)
+      ).body.items.length,
+    ).toBeGreaterThan(0);
+
+    const callback = await client
+      .post('/v1/callbacks')
+      .set('Authorization', `Bearer ${API_TOKEN}`)
+      .set('Idempotency-Key', 'callback-create-1')
+      .set('X-Correlation-Id', 'callback-create-1')
+      .send({ url: 'http://10.40.0.1/callback', events: ['job.completed'] });
+    expect(callback.status).toBe(201);
+    const callbackId = String(callback.body.id);
+    expect(
+      (await client.get(`/v1/callbacks/${callbackId}`).set('Authorization', `Bearer ${API_TOKEN}`))
+        .body,
+    ).toMatchObject({ id: callbackId, events: ['job.completed'] });
+    expect(
+      (await client.get('/v1/callbacks').set('Authorization', `Bearer ${API_TOKEN}`)).body.items,
+    ).toEqual(expect.arrayContaining([expect.objectContaining({ id: callbackId })]));
+    const callbackReplay = await client
+      .post('/v1/callbacks')
+      .set('Authorization', `Bearer ${API_TOKEN}`)
+      .set('Idempotency-Key', 'callback-create-1')
+      .set('X-Correlation-Id', 'callback-create-1')
+      .send({ url: 'http://10.40.0.1/callback', events: ['job.completed'] });
+    expect(callbackReplay.status).toBe(201);
+    expect(callbackReplay.body.id).toBe(callbackId);
+
+    const canonicalCancel = await client
+      .post(`/v1/jobs/${jobId}/cancel`)
+      .set('Authorization', `Bearer ${API_TOKEN}`)
+      .set('Idempotency-Key', 'canonical-cancel-1')
+      .set('X-Correlation-Id', 'canonical-cancel-1');
+    expect(canonicalCancel.status).toBe(409);
+    expect(canonicalCancel.body.error).toBe('job_terminal');
+    const reconciled = await client
+      .post(`/v1/operations/${jobId}/reconcile`)
+      .set('Authorization', `Bearer ${API_TOKEN}`)
+      .set('Idempotency-Key', 'canonical-reconcile-1')
+      .set('X-Correlation-Id', 'canonical-reconcile-1');
+    expect(reconciled.status).toBe(200);
+    expect(reconciled.body).toMatchObject({
+      operation_id: jobId,
+      status: 'completed',
+      reconciliation_required: false,
+    });
+
     const cancelled = await client
       .post(`/api/v1/jobs/${jobId}/cancel`)
       .set('Authorization', `Bearer ${API_TOKEN}`)

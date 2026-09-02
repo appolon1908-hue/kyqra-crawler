@@ -11,7 +11,9 @@ grep -Fq "github.ref == 'refs/heads/main' && github.ref_protected == true" "$wor
 grep -Fq 'test "$GITHUB_REF_PROTECTED" = '\''true'\''' "$workflow"
 grep -Fq 'ref: ${{ github.sha }}' "$workflow"
 grep -Fq 'persist-credentials: false' "$workflow"
-grep -Fq 'build-args: SOURCE_DATE_EPOCH=${{ steps.source.outputs.epoch }}' "$workflow"
+grep -Fq 'build-args: |' "$workflow"
+grep -Fq 'SOURCE_DATE_EPOCH=${{ steps.source.outputs.epoch }}' "$workflow"
+grep -Fq 'SOURCE_COMMIT_SHA=${{ env.SOURCE_SHA }}' "$workflow"
 
 ! grep -Eq 'pull-requests:[[:space:]]*write|contents:[[:space:]]*write|issues:[[:space:]]*write' "$workflow"
 test "$(grep -Ec 'uses: [a-z0-9-]+/[a-z0-9-]+@[0-9a-f]{40}$' "$workflow")" = 6
