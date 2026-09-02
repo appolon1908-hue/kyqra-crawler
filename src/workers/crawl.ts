@@ -26,6 +26,7 @@ import {
 } from '../queues/completion-callbacks.js';
 import { crawlQueueForKind } from '../queues/crawl.js';
 import {
+  countJobResults,
   getInternalJobState,
   getInternalJobStatus,
   insertResult,
@@ -123,7 +124,13 @@ export const processCrawlJob = async (
     await queueCompletionCallbacks(runtime, jobId, spec, completedProgress);
     return completedProgress;
   }
-  const progress: CrawlProgress = { processed: 0, records: 0, failed: 0 };
+  const priorProgress = storedCompletionProgress(job.progress);
+  const durableRecords = await countJobResults(runtime.db, jobId);
+  const progress: CrawlProgress = {
+    processed: durableRecords,
+    records: durableRecords,
+    failed: priorProgress.failed,
+  };
   const guardTarget = createCrawlTargetGuard();
   const routedPages = new WeakSet<object>();
   if (!(await markJobRunning(runtime.db, jobId))) {
@@ -146,6 +153,7 @@ export const processCrawlJob = async (
     sameDomainDelaySecs: 1 / spec.requestsPerSecond,
     failedRequestHandler: async ({ request }: { request: Request }) => {
       progress.failed += 1;
+      await job.updateProgress(progress);
       log('warn', 'request_failed', { jobId, url: safeLogUrl(request.url) });
     },
   };
@@ -245,6 +253,9 @@ export const processCrawlJob = async (
         crawlConfiguration,
       ).run();
     }
+    progress.records = await countJobResults(runtime.db, jobId);
+    progress.processed = progress.records;
+    await job.updateProgress(progress);
     if (!(await markJobCompleted(runtime.db, jobId, progress))) {
       job.discard();
       throw new NonRetryableError('job_no_longer_running');

@@ -7,14 +7,15 @@ import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testconta
 import { RedisContainer, type StartedRedisContainer } from '@testcontainers/redis';
 import type { FastifyInstance } from 'fastify';
 import request, { type SuperTest, type Test } from 'supertest';
-import type { Worker } from 'bullmq';
+import { Worker } from 'bullmq';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { buildApi } from '../../src/api/app.js';
+import { removeCrawlJob } from '../../src/queues/crawl.js';
 import { closeRuntime, createRuntime } from '../../src/runtime.js';
 import type { JobSpec } from '../../src/config/schema.js';
 import { migrateDatabase } from '../../src/storage/postgres/migrate.js';
-import type { Runtime } from '../../src/types.js';
+import type { CallbackJobData, Runtime } from '../../src/types.js';
 import { createCrawlWorker } from '../../src/workers/crawl.js';
 import { startFixtureSite, type FixtureSite } from '../fixtures/site/server.js';
 
@@ -269,6 +270,46 @@ describe('HTTP job submission through real Redis and Postgres', () => {
       status: 'SUCCEEDED',
       callbacks_reconciled: true,
     });
+    const resultRow = await runtime.db.query<{ id: string }>(
+      'select id::text from results where job_id=$1 order by id limit 1',
+      [jobId],
+    );
+    const callbackJobId = `kyqra-result-${jobId}-${resultRow.rows[0]?.id}`;
+    const failingCallbackWorker = new Worker<CallbackJobData>(
+      'callbacks',
+      async () => {
+        throw new Error('fixture_callback_failure');
+      },
+      { connection: runtime.redisConnection },
+    );
+    await failingCallbackWorker.waitUntilReady();
+    await runtime.callbackQueue.add(
+      'result',
+      { jobId, url: 'http://10.40.0.1/api/v1/kyqra/results', payload: {} },
+      { jobId: callbackJobId, attempts: 1 },
+    );
+    const callbackFailureDeadline = Date.now() + 5_000;
+    while (
+      Date.now() < callbackFailureDeadline &&
+      (await runtime.callbackQueue.getJob(callbackJobId))?.failedReason !==
+        'fixture_callback_failure'
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    await failingCallbackWorker.close();
+    expect(await (await runtime.callbackQueue.getJob(callbackJobId))?.getState()).toBe('failed');
+    process.env.MIDDLEWARE_BASE_URL = 'http://10.40.0.1';
+    const revivedCallbacks = await client
+      .post(`/api/v1/operations/${jobId}/reconcile`)
+      .set('Authorization', `Bearer ${API_TOKEN}`)
+      .set('Idempotency-Key', 'fixture-callback-reconcile-2')
+      .set('X-Correlation-Id', 'fixture-callback-reconcile-2');
+    expect(revivedCallbacks.status).toBe(202);
+    expect(await (await runtime.callbackQueue.getJob(callbackJobId))?.getState()).toBe('waiting');
+    for (const queuedId of [callbackJobId, `kyqra-progress-${jobId}`]) {
+      await (await runtime.callbackQueue.getJob(queuedId))?.remove();
+    }
+    process.env.MIDDLEWARE_BASE_URL = '';
     expect(
       (await client.get('/metrics').set('Authorization', `Bearer ${READONLY_TOKEN}`)).status,
     ).toBe(403);
@@ -350,6 +391,34 @@ describe('HTTP job submission through real Redis and Postgres', () => {
     expect(retriedResults.body.count).toBe(1);
 
     await runtime.httpCrawlQueue.pause();
+    const orphanSubmission = await client
+      .post('/api/v1/jobs')
+      .set('Authorization', `Bearer ${API_TOKEN}`)
+      .set('Idempotency-Key', 'orphan-queued-submit-1')
+      .set('X-Correlation-Id', 'orphan-queued-submit-1')
+      .send({
+        startUrls: [`${fixture.baseUrl}/static`],
+        mode: 'single',
+        maxPages: 1,
+        maxDepth: 0,
+        browser: 'http',
+      });
+    expect(orphanSubmission.status).toBe(202);
+    const orphanJobId = String(orphanSubmission.body.id);
+    await removeCrawlJob(runtime, orphanJobId);
+    expect(await runtime.httpCrawlQueue.getJob(orphanJobId)).toBeUndefined();
+    const orphanReconcile = await client
+      .post(`/api/v1/operations/${orphanJobId}/reconcile`)
+      .set('Authorization', `Bearer ${API_TOKEN}`)
+      .set('Idempotency-Key', 'orphan-queued-reconcile-1')
+      .set('X-Correlation-Id', 'orphan-queued-reconcile-1');
+    expect(orphanReconcile.status).toBe(202);
+    expect(orphanReconcile.body).toMatchObject({
+      operation_id: orphanJobId,
+      status: 'QUEUED',
+      queue_entry_recreated: true,
+    });
+    expect(await runtime.httpCrawlQueue.getJob(orphanJobId)).toBeDefined();
     const raceSubmission = await client
       .post('/api/v1/jobs')
       .set('Authorization', `Bearer ${API_TOKEN}`)
@@ -387,6 +456,7 @@ describe('HTTP job submission through real Redis and Postgres', () => {
     expect(raceState.rows[0]?.status).toBe('queued');
     expect(await runtime.httpCrawlQueue.getJob(raceJobId)).toBeDefined();
     await runtime.httpCrawlQueue.resume();
+    await waitForCompleted(client, orphanJobId);
     await waitForCompleted(client, raceJobId);
 
     for (const endpoint of [

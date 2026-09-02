@@ -81,7 +81,16 @@ export const isProhibitedAddress = (address: string): boolean => {
     );
   }
   const value = address.toLowerCase();
-  if (value.startsWith('::ffff:')) return isProhibitedAddress(value.slice(7));
+  if (value.startsWith('::ffff:')) {
+    const mapped = value.slice(7);
+    if (net.isIPv4(mapped)) return isProhibitedAddress(mapped);
+    const hexadecimal = /^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(mapped);
+    if (!hexadecimal) return true;
+    const high = Number.parseInt(hexadecimal[1] || '', 16);
+    const low = Number.parseInt(hexadecimal[2] || '', 16);
+    const normalized = `${high >>> 8}.${high & 255}.${low >>> 8}.${low & 255}`;
+    return isProhibitedAddress(normalized);
+  }
   return (
     value === '::' ||
     value === '::1' ||

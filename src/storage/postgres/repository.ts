@@ -73,6 +73,14 @@ export const getInternalJobState = async (
   return result.rows[0] ?? null;
 };
 
+export const countJobResults = async (db: Pool, jobId: string): Promise<number> => {
+  const result = await db.query<{ count: number }>(
+    'select count(*)::integer as count from results where job_id=$1',
+    [jobId],
+  );
+  return result.rows[0]?.count ?? 0;
+};
+
 export const markJobRunning = async (db: Pool, jobId: string): Promise<boolean> => {
   const result = await db.query(
     `with claimed as (

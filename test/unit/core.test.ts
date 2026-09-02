@@ -65,6 +65,8 @@ describe('crawler core behavior', () => {
     expect(isProhibitedAddress('192.168.1.1')).toBe(true);
     expect(isProhibitedAddress('8.8.8.8')).toBe(false);
     expect(isProhibitedAddress('::1')).toBe(true);
+    expect(isProhibitedAddress('::ffff:7f00:1')).toBe(true);
+    expect(isProhibitedAddress('::ffff:0808:0808')).toBe(false);
     expect(isProhibitedAddress('2001:4860:4860::8888')).toBe(false);
     expect(callbackSignatureInput('post', '//events//done', '1', '2', 'kyqra', '{}')).toMatch(
       /^v1\nPOST\n\/events\/done\n1\n2\nkyqra\n[0-9a-f]{64}$/,

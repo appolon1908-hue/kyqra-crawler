@@ -12,7 +12,7 @@ import {
   markJobFailed,
   type JobStatusRow,
 } from '../storage/postgres/repository.js';
-import { crawlQueueForSpec, removeCrawlJob } from '../queues/crawl.js';
+import { crawlQueueForSpec, findCrawlJob, removeCrawlJob } from '../queues/crawl.js';
 import {
   queueCompletionCallbacks,
   storedCompletionProgress,
@@ -175,6 +175,33 @@ export const registerCanonicalApi = (app: FastifyInstance, runtime: Runtime): vo
               operation_id: job.id,
               status: 'SUCCEEDED',
               callbacks_reconciled: true,
+            },
+          };
+        }
+        if (job.status === 'queued') {
+          if (await findCrawlJob(runtime, job.id)) {
+            return {
+              code: 200,
+              body: {
+                operation_id: job.id,
+                status: 'QUEUED',
+                reconciliation_required: false,
+              },
+            };
+          }
+          try {
+            await crawlQueueForSpec(runtime, payload).add('crawl', payload, { jobId: job.id });
+          } catch (error: unknown) {
+            await markJobFailed(runtime.db, job.id, 'queue_reconcile_failed');
+            throw error;
+          }
+          return {
+            code: 202,
+            body: {
+              operation_id: job.id,
+              status: 'QUEUED',
+              reconciliation_required: false,
+              queue_entry_recreated: true,
             },
           };
         }
